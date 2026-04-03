@@ -1,0 +1,12 @@
+# clibroker client example configuration
+# Copy to client.yaml and adjust for your environment.
+
+default_backend: local
+
+backends:
+  local:
+    type: http
+    base_url: http://127.0.0.1:8080
+    token: env:CLIBROKER_TOKEN_READER
+    timeout_s: 30.0
+    verify_tls: true

@@ -1,0 +1,138 @@
+"""Configuration models — YAML config parsed into validated Pydantic models."""
+
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class FlagConfig(BaseModel):
+    """Allowlist of flags permitted for a rule."""
+
+    allowed: list[str] = []
+
+
+class PositionalArg(BaseModel):
+    """Validation constraints for a single positional argument."""
+
+    name: str
+    pattern: str | None = None  # regex the value must match
+    enum: list[str] | None = None  # allowed literal values
+
+    @field_validator("pattern")
+    @classmethod
+    def _compile_pattern(cls, v: str | None) -> str | None:
+        if v is not None:
+            re.compile(v)  # fail fast on invalid regex
+        return v
+
+
+class Rule(BaseModel):
+    """A single policy rule attached to a command path."""
+
+    id: str
+    command: list[str] = Field(..., min_length=1)  # e.g. ["message", "move"]
+    effect: Literal["allow", "deny"] = "allow"
+    flags: FlagConfig | None = None
+    positionals: list[PositionalArg] = []
+
+
+class ToolConfig(BaseModel):
+    """Configuration for a single wrapped CLI tool."""
+
+    executable: str  # must be absolute path
+    default_args: list[str] = []
+    env: dict[str, str] = {}
+    working_dir: str | None = None
+    timeout_s: float = 30.0
+    max_output_bytes: int = 1_048_576  # 1 MB
+    rules: list[Rule]
+
+    @field_validator("executable")
+    @classmethod
+    def _executable_is_absolute(cls, v: str) -> str:
+        if not Path(v).is_absolute():
+            raise ValueError(f"executable must be an absolute path, got: {v}")
+        return v
+
+
+class TokenConfig(BaseModel):
+    """A bearer token with associated RBAC rule allowlist."""
+
+    name: str
+    value: str  # literal or "env:VAR_NAME"
+    allow_rules: list[str]
+
+    def resolve_value(self) -> str:
+        """Return the actual token value, resolving env: indirection."""
+        if self.value.startswith("env:"):
+            var = self.value[4:]
+            resolved = os.environ.get(var)
+            if resolved is None:
+                raise RuntimeError(
+                    f"Token '{self.name}' references env var '{var}' which is not set"
+                )
+            return resolved
+        return self.value
+
+
+class AuthConfig(BaseModel):
+    """Authentication configuration."""
+
+    type: Literal["bearer"] = "bearer"
+    tokens: list[TokenConfig] = []
+
+
+class ServerConfig(BaseModel):
+    """Top-level server settings."""
+
+    bind: str = "127.0.0.1:8080"
+    auth: AuthConfig = AuthConfig()
+    request_timeout_s: float = 30.0
+    max_output_bytes: int = 1_048_576
+
+
+class Config(BaseModel):
+    """Root configuration model."""
+
+    server: ServerConfig = ServerConfig()
+    tools: dict[str, ToolConfig]
+
+    @model_validator(mode="after")
+    def _check_rule_ids_unique(self) -> Config:
+        seen: set[str] = set()
+        for tool_name, tool in self.tools.items():
+            for rule in tool.rules:
+                if rule.id in seen:
+                    raise ValueError(
+                        f"Duplicate rule id '{rule.id}' (found in tool '{tool_name}')"
+                    )
+                seen.add(rule.id)
+        return self
+
+    @model_validator(mode="after")
+    def _check_token_rules_exist(self) -> Config:
+        all_rule_ids = {rule.id for tool in self.tools.values() for rule in tool.rules}
+        for token in self.server.auth.tokens:
+            for rule_id in token.allow_rules:
+                if rule_id not in all_rule_ids:
+                    raise ValueError(
+                        f"Token '{token.name}' references unknown rule '{rule_id}'"
+                    )
+        return self
+
+
+def load_config(path: str | Path) -> Config:
+    """Load and validate configuration from a YAML file."""
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Config file must be a YAML mapping, got {type(raw).__name__}"
+        )
+    return Config.model_validate(raw)

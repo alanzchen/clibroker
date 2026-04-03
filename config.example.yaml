@@ -1,0 +1,94 @@
+# clibroker example configuration
+# Copy to config.yaml and adjust for your environment.
+#
+# Endpoints:
+#   POST /execute              — REST API (requires Bearer <token> header)
+#   GET  /client-config        — Token-scoped config for clibroker-client
+#   POST /mcp/<slug>/          — MCP streamable HTTP transport (JSON-RPC)
+#   GET  /sse/<slug>/          — MCP SSE transport
+#   GET  /token-info           — Discover your slug (requires Bearer header)
+#   GET  /health               — Health check (unauthenticated)
+#
+# Authentication:
+#   - REST /execute uses the standard Authorization: Bearer <token> header.
+#   - GET /client-config also uses the standard Authorization: Bearer <token>
+#     header and returns only the allow-rules visible to that token.
+#   - MCP and SSE endpoints use an opaque URL slug derived from the token:
+#       slug = SHA-256(token)[:16]
+#     This ensures plaintext secrets never appear in URLs, access logs,
+#     Referer headers, or browser history.
+#   - Use GET /token-info (with Bearer header) to discover your slug,
+#     MCP URL, and SSE URL.
+#   - Each slug's MCP server only exposes the tools listed in that
+#     token's allow_rules (RBAC isolation at the MCP layer).
+#   - Requests to /mcp/ or /sse/ without a valid slug receive 401.
+#
+# Token values support "env:VAR_NAME" indirection — the actual secret is
+# read from the environment variable at startup.
+#
+# MCP clients (Claude Desktop, Cursor, etc.) should connect to
+# /mcp/<slug>/ using the streamable HTTP transport.  Each allowed
+# policy rule is exposed as a typed MCP tool with full parameter schemas
+# for LLM discoverability.  Deny rules are excluded entirely from the
+# MCP tool list.
+
+server:
+  bind: "127.0.0.1:8080"
+  request_timeout_s: 30.0
+  max_output_bytes: 1048576
+  auth:
+    type: bearer
+    tokens:
+      - name: reader
+        value: "env:CLIBROKER_TOKEN_READER"
+        allow_rules:
+          - list_messages
+          - read_message
+      - name: operator
+        value: "env:CLIBROKER_TOKEN_OPERATOR"
+        allow_rules:
+          - list_messages
+          - read_message
+          - move_message
+
+tools:
+  himalaya:
+    executable: /usr/local/bin/himalaya
+    default_args: ["--output", "json"]
+    env:
+      HOME: "/srv/clibroker"
+      XDG_CONFIG_HOME: "/srv/clibroker/config"
+    working_dir: null
+    timeout_s: 30.0
+    max_output_bytes: 1048576
+    rules:
+      - id: list_messages
+        command: ["message", "list"]
+        effect: allow
+        flags:
+          allowed: ["--account", "--folder", "--page"]
+        positionals: []
+
+      - id: read_message
+        command: ["message", "read"]
+        effect: allow
+        flags:
+          allowed: ["--account", "--folder"]
+        positionals:
+          - name: id
+            pattern: "^[0-9]+$"
+
+      - id: move_message
+        command: ["message", "move"]
+        effect: allow
+        flags:
+          allowed: ["--account", "--folder"]
+        positionals:
+          - name: id
+            pattern: "^[0-9]+$"
+          - name: destination
+            enum: ["Inbox", "Archive", "Flagged"]
+
+      - id: deny_delete
+        command: ["message", "delete"]
+        effect: deny
