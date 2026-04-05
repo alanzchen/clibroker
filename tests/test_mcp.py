@@ -7,6 +7,7 @@ import json
 import sys
 
 import pytest
+import yaml
 
 from clibroker.app import create_app
 from clibroker.config import Config
@@ -86,6 +87,8 @@ class TestToolRegistration:
         assert "account" in schema["properties"]
         assert "folder" in schema["properties"]
         assert "page" in schema["properties"]
+        assert "unread" in schema["properties"]
+        assert "unread" not in schema.get("required", [])
 
     def test_allowed_rules_filter(self) -> None:
         """When allowed_rules is given, only those rules become tools."""
@@ -108,6 +111,37 @@ class TestToolRegistration:
         policy = PolicyEngine(config)
         mcp = create_mcp_server(config, policy, allowed_rules=set())
         assert len(mcp._tool_manager._tools) == 0
+
+    def test_variadic_positional_schema(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: search_messages
+                    command: ["envelope", "list"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^[A-Za-z0-9_@.+:-]+$"
+                        variadic: true
+            """
+        )
+        config = Config.model_validate(raw)
+        policy = PolicyEngine(config)
+        mcp = create_mcp_server(config, policy)
+        tool = mcp._tool_manager._tools["himalaya__search_messages"]
+        schema = tool.parameters
+        assert schema["properties"]["query"]["type"] == "array"
+        assert schema["properties"]["query"]["items"]["type"] == "string"
+        assert "query" in schema.get("required", [])
 
 
 # ---------------------------------------------------------------------------

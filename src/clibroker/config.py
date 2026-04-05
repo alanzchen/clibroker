@@ -14,7 +14,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class FlagConfig(BaseModel):
     """Allowlist of flags permitted for a rule."""
 
-    allowed: list[str] = []
+    allowed: list[str] = Field(default_factory=list)
+    standalone: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_disjoint_flag_sets(self) -> "FlagConfig":
+        overlap = sorted(set(self.allowed) & set(self.standalone))
+        if overlap:
+            raise ValueError(
+                "flags.allowed and flags.standalone must be disjoint; "
+                f"overlap: {overlap}"
+            )
+        return self
 
 
 class PositionalArg(BaseModel):
@@ -23,6 +34,7 @@ class PositionalArg(BaseModel):
     name: str
     pattern: str | None = None  # regex the value must match
     enum: list[str] | None = None  # allowed literal values
+    variadic: bool = False
 
     @field_validator("pattern")
     @classmethod
@@ -39,15 +51,29 @@ class Rule(BaseModel):
     command: list[str] = Field(..., min_length=1)  # e.g. ["message", "move"]
     effect: Literal["allow", "deny"] = "allow"
     flags: FlagConfig | None = None
-    positionals: list[PositionalArg] = []
+    inject_args: list[str] = Field(default_factory=list)
+    positionals: list[PositionalArg] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_variadic_positionals(self) -> "Rule":
+        variadic_indexes = [
+            index
+            for index, positional in enumerate(self.positionals)
+            if positional.variadic
+        ]
+        if len(variadic_indexes) > 1:
+            raise ValueError("Only one positional may be variadic")
+        if variadic_indexes and variadic_indexes[0] != len(self.positionals) - 1:
+            raise ValueError("Only the final positional may be variadic")
+        return self
 
 
 class ToolConfig(BaseModel):
     """Configuration for a single wrapped CLI tool."""
 
     executable: str  # must be absolute path
-    default_args: list[str] = []
-    env: dict[str, str] = {}
+    default_args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
     working_dir: str | None = None
     timeout_s: float = 30.0
     max_output_bytes: int = 1_048_576  # 1 MB
@@ -85,7 +111,7 @@ class AuthConfig(BaseModel):
     """Authentication configuration."""
 
     type: Literal["bearer"] = "bearer"
-    tokens: list[TokenConfig] = []
+    tokens: list[TokenConfig] = Field(default_factory=list)
 
 
 class ServerConfig(BaseModel):

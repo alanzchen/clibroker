@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .config import Config, Rule, ToolConfig
+from .config import Config, PositionalArg, Rule, ToolConfig
 
 
 class PolicyError(Exception):
@@ -128,6 +128,7 @@ class PolicyEngine:
                     [tool_cfg.executable]
                     + tool_cfg.default_args
                     + rule.command
+                    + rule.inject_args
                     + validated_argv
                 )
                 return PolicyResult(
@@ -146,9 +147,9 @@ class PolicyEngine:
         Flag parsing rules:
         - ``--`` marks end-of-options; everything after is a positional.
         - ``--flag=value`` is split into ``--flag`` + ``value``.
-        - Every allowed flag consumes exactly one subsequent argument as its
-          value (no boolean/standalone flags — clibroker doesn't know the
-          target CLI's flag semantics, so the safest model is value-required).
+        - Every flag in ``flags.allowed`` consumes exactly one subsequent
+          argument as its value.
+        - Every flag in ``flags.standalone`` is a valueless boolean flag.
         - Any argument starting with ``-`` that is not a recognized allowed
           flag is rejected.
         """
@@ -156,6 +157,7 @@ class PolicyEngine:
         positionals: list[str] = []
 
         allowed_flags = set(rule.flags.allowed) if rule.flags else set()
+        standalone_flags = set(rule.flags.standalone) if rule.flags else set()
 
         # Normalize: expand --flag=value into two elements
         normalized: list[str] = []
@@ -164,6 +166,11 @@ class PolicyEngine:
                 normalized.append(arg)
             elif arg.startswith("--") and "=" in arg:
                 flag_part, _, val_part = arg.partition("=")
+                if flag_part in standalone_flags:
+                    raise PolicyValidationError(
+                        rule.id,
+                        f"Standalone flag '{flag_part}' does not take a value",
+                    )
                 normalized.append(flag_part)
                 normalized.append(val_part)
             else:
@@ -186,6 +193,11 @@ class PolicyEngine:
 
             if arg.startswith("-"):
                 # It's a flag
+                if arg in standalone_flags:
+                    flags.append(arg)
+                    i += 1
+                    continue
+
                 if arg not in allowed_flags:
                     raise PolicyValidationError(rule.id, f"Flag '{arg}' is not allowed")
                 flags.append(arg)
@@ -202,31 +214,60 @@ class PolicyEngine:
 
             i += 1
 
-        # Validate positional count
         expected_positionals = rule.positionals
-        if len(positionals) != len(expected_positionals):
+
+        variadic_positional = None
+        if expected_positionals and expected_positionals[-1].variadic:
+            variadic_positional = expected_positionals[-1]
+
+        if variadic_positional is None:
+            if len(positionals) != len(expected_positionals):
+                raise PolicyValidationError(
+                    rule.id,
+                    f"Expected {len(expected_positionals)} positional arg(s) "
+                    f"({', '.join(p.name for p in expected_positionals)}), "
+                    f"got {len(positionals)}",
+                )
+
+            for pos_cfg, pos_val in zip(expected_positionals, positionals):
+                self._validate_positional_value(rule.id, pos_cfg, pos_val)
+            return flags + positionals
+
+        fixed_positionals = expected_positionals[:-1]
+        min_positionals = len(fixed_positionals) + 1
+        if len(positionals) < min_positionals:
             raise PolicyValidationError(
                 rule.id,
-                f"Expected {len(expected_positionals)} positional arg(s) "
+                f"Expected at least {min_positionals} positional arg(s) "
                 f"({', '.join(p.name for p in expected_positionals)}), "
                 f"got {len(positionals)}",
             )
 
-        # Validate each positional
-        for pos_cfg, pos_val in zip(expected_positionals, positionals):
-            if pos_cfg.enum is not None and pos_val not in pos_cfg.enum:
-                raise PolicyValidationError(
-                    rule.id,
-                    f"Positional '{pos_cfg.name}' value '{pos_val}' "
-                    f"not in allowed values: {pos_cfg.enum}",
-                )
-            if pos_cfg.pattern is not None and not re.fullmatch(
-                pos_cfg.pattern, pos_val
-            ):
-                raise PolicyValidationError(
-                    rule.id,
-                    f"Positional '{pos_cfg.name}' value '{pos_val}' "
-                    f"does not match pattern: {pos_cfg.pattern}",
-                )
+        for pos_cfg, pos_val in zip(
+            fixed_positionals, positionals[: len(fixed_positionals)]
+        ):
+            self._validate_positional_value(rule.id, pos_cfg, pos_val)
+
+        for pos_val in positionals[len(fixed_positionals) :]:
+            self._validate_positional_value(rule.id, variadic_positional, pos_val)
 
         return flags + positionals
+
+    def _validate_positional_value(
+        self,
+        rule_id: str,
+        pos_cfg: PositionalArg,
+        pos_val: str,
+    ) -> None:
+        if pos_cfg.enum is not None and pos_val not in pos_cfg.enum:
+            raise PolicyValidationError(
+                rule_id,
+                f"Positional '{pos_cfg.name}' value '{pos_val}' "
+                f"not in allowed values: {pos_cfg.enum}",
+            )
+        if pos_cfg.pattern is not None and not re.fullmatch(pos_cfg.pattern, pos_val):
+            raise PolicyValidationError(
+                rule_id,
+                f"Positional '{pos_cfg.name}' value '{pos_val}' "
+                f"does not match pattern: {pos_cfg.pattern}",
+            )

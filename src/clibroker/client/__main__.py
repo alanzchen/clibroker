@@ -91,8 +91,13 @@ async def _run(args: argparse.Namespace) -> int:
                 parts = [f"  {rule.id}: {' '.join(rule.command)}"]
                 if rule.flags:
                     parts.append(f"flags={', '.join(rule.flags)}")
+                if rule.standalone_flags:
+                    parts.append(f"standalone_flags={', '.join(rule.standalone_flags)}")
                 if rule.positionals:
-                    pos_names = ", ".join(pos.name for pos in rule.positionals)
+                    pos_names = ", ".join(
+                        f"{pos.name}..." if pos.variadic else pos.name
+                        for pos in rule.positionals
+                    )
                     parts.append(f"positionals={pos_names}")
                 print(" ".join(parts))
         return 0

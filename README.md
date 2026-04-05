@@ -274,6 +274,7 @@ Example response:
           "id": "list_messages",
           "command": ["message", "list"],
           "flags": ["--account", "--folder", "--page"],
+          "standalone_flags": ["--unread"],
           "positionals": []
         }
       ]
@@ -351,7 +352,9 @@ Each rule includes:
 - `id`: unique rule ID
 - `command`: command path, such as `['message', 'read']`
 - `effect`: `allow` or `deny`
-- `flags.allowed`: allowed flags for that rule
+- `flags.allowed`: allowed flags that require a value
+- `flags.standalone`: allowed boolean flags that take no value
+- `inject_args`: fixed server-side args always inserted for the rule
 - `positionals`: positional argument validators
 
 Example allow rule:
@@ -360,11 +363,26 @@ Example allow rule:
 - id: read_message
   command: ["message", "read"]
   effect: allow
+  inject_args: ["--preview"]
   flags:
     allowed: ["--account", "--folder"]
   positionals:
     - name: id
       pattern: "^[0-9]+$"
+```
+
+Example variadic tail rule:
+
+```yaml
+- id: search_messages
+  command: ["envelope", "list"]
+  effect: allow
+  flags:
+    allowed: ["--account", "--folder", "--page", "--page-size"]
+  positionals:
+    - name: query
+      pattern: "^[A-Za-z0-9_@.+:-]+$"
+      variadic: true
 ```
 
 Example deny rule:
@@ -381,8 +399,17 @@ Important validation rules:
 - unknown flags are rejected
 - `--flag=value` is supported
 - `--` marks end-of-options
-- each allowed flag must consume one value argument
+- `flags.allowed` entries must consume one value argument
+- `flags.standalone` entries must not consume a value
+- `flags.allowed` and `flags.standalone` must be disjoint
+- only the final positional may be marked `variadic: true`
+- a variadic positional validates each token in the tail individually
 - deny rules cascade to child command paths
+
+Notes:
+
+- `inject_args` are server-controlled and are not exposed as client-supplied parameters in `/client-config` or MCP tool schemas
+- execution order is `executable + default_args + command + inject_args + validated user args`
 
 ## Testing
 

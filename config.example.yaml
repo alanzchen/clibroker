@@ -43,11 +43,13 @@ server:
         value: "env:CLIBROKER_TOKEN_READER"
         allow_rules:
           - list_messages
+          - search_messages
           - read_message
       - name: operator
         value: "env:CLIBROKER_TOKEN_OPERATOR"
         allow_rules:
           - list_messages
+          - search_messages
           - read_message
           - move_message
 
@@ -67,11 +69,23 @@ tools:
         effect: allow
         flags:
           allowed: ["--account", "--folder", "--page"]
+          standalone: ["--unread"]
         positionals: []
+
+      - id: search_messages
+        command: ["envelope", "list"]
+        effect: allow
+        flags:
+          allowed: ["--account", "--folder", "--page", "--page-size"]
+        positionals:
+          - name: query
+            pattern: "^[A-Za-z0-9_@.+:-]+$"
+            variadic: true
 
       - id: read_message
         command: ["message", "read"]
         effect: allow
+        inject_args: ["--preview"]
         flags:
           allowed: ["--account", "--folder"]
         positionals:

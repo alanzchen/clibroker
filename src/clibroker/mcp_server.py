@@ -73,18 +73,23 @@ def _register_rule_tool(
     """Register a single MCP tool for an allowed policy rule."""
     log = get_audit_logger()
 
-    # Build flag-name mapping: python_param_name -> --flag-string
-    flag_map: dict[str, str] = {}
+    # Build flag-name mappings: python_param_name -> CLI flag string
+    value_flag_map: dict[str, str] = {}
+    standalone_flag_map: dict[str, str] = {}
     if rule.flags:
         for flag in rule.flags.allowed:
             param_name = flag.lstrip("-").replace("-", "_")
-            flag_map[param_name] = flag
+            value_flag_map[param_name] = flag
+        for flag in rule.flags.standalone:
+            param_name = flag.lstrip("-").replace("-", "_")
+            standalone_flag_map[param_name] = flag
 
     # Capture loop variables in default args to avoid late-binding issues
     _rule = rule
     _tool_name = tool_name
     _tool_cfg = tool_cfg
-    _flag_map = dict(flag_map)
+    _value_flag_map = dict(value_flag_map)
+    _standalone_flag_map = dict(standalone_flag_map)
     _allowed_rules = allowed_rules
 
     async def handler(**kwargs: Any) -> str:
@@ -92,15 +97,24 @@ def _register_rule_tool(
         # Build argv from structured kwargs
         argv: list[str] = list(_rule.command)
 
-        # Append flags
-        for param_name, flag_str in _flag_map.items():
+        # Append value-taking flags
+        for param_name, flag_str in _value_flag_map.items():
             val = kwargs.get(param_name)
             if val is not None and val != "":
                 argv.extend([flag_str, str(val)])
 
+        # Append standalone flags
+        for param_name, flag_str in _standalone_flag_map.items():
+            if kwargs.get(param_name):
+                argv.append(flag_str)
+
         # Append positionals in declaration order
         for pos in _rule.positionals:
             val = kwargs.get(pos.name)
+            if pos.variadic:
+                if val is not None:
+                    argv.extend(str(item) for item in val)
+                continue
             if val is not None:
                 argv.append(str(val))
 
@@ -186,16 +200,17 @@ def _register_rule_tool(
 
     # Positionals (required)
     for pos in rule.positionals:
+        annotation = list[str] if pos.variadic else str
         params.append(
             inspect.Parameter(
                 pos.name,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=str,
+                annotation=annotation,
             )
         )
 
-    # Flags (optional, default None)
-    for param_name in flag_map:
+    # Value-taking flags (optional, default None)
+    for param_name in value_flag_map:
         params.append(
             inspect.Parameter(
                 param_name,
@@ -205,7 +220,20 @@ def _register_rule_tool(
             )
         )
 
-    handler.__signature__ = inspect.Signature(params, return_annotation=str)
+    # Standalone flags (optional boolean)
+    for param_name in standalone_flag_map:
+        params.append(
+            inspect.Parameter(
+                param_name,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                default=False,
+                annotation=bool,
+            )
+        )
+
+    handler.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        params, return_annotation=str
+    )
 
     # --- Function metadata ---
     func_name = f"{tool_name}__{rule.id}"
@@ -214,6 +242,8 @@ def _register_rule_tool(
 
     # Build a human-readable description
     desc_lines = [f"Execute: {tool_name} {' '.join(rule.command)}"]
+    if rule.inject_args:
+        desc_lines.append(f"Injected args: {' '.join(rule.inject_args)}")
     if rule.positionals:
         desc_lines.append("Parameters:")
         for pos in rule.positionals:
@@ -222,9 +252,14 @@ def _register_rule_tool(
                 constraint = f" (one of: {', '.join(pos.enum)})"
             elif pos.pattern:
                 constraint = f" (must match: {pos.pattern})"
-            desc_lines.append(f"  - {pos.name}: required{constraint}")
-    if flag_map:
-        desc_lines.append(f"Optional flags: {', '.join(flag_map.values())}")
+            label = f"{pos.name}..." if pos.variadic else pos.name
+            desc_lines.append(f"  - {label}: required{constraint}")
+    if value_flag_map:
+        desc_lines.append(f"Optional flags: {', '.join(value_flag_map.values())}")
+    if standalone_flag_map:
+        desc_lines.append(
+            f"Optional standalone flags: {', '.join(standalone_flag_map.values())}"
+        )
     handler.__doc__ = "\n".join(desc_lines)
 
     # Register with FastMCP

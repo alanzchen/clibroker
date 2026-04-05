@@ -136,6 +136,17 @@ class TestPolicyEnforcement:
         assert "not allowed" in body["stderr"]
 
     @pytest.mark.asyncio
+    async def test_standalone_flag_accepted(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/execute",
+            json={"tool": "himalaya", "argv": ["message", "list", "--unread"]},
+            headers={"Authorization": f"Bearer {READER_TOKEN}"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["matched_rule"] == "list_messages"
+
+    @pytest.mark.asyncio
     async def test_invalid_positional_rejected(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/execute",

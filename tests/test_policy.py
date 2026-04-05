@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+import yaml
+
 from clibroker.config import Config
 from clibroker.policy import (
     PolicyDenied,
@@ -54,6 +56,13 @@ class TestCommandTreeMatching:
         assert result.full_argv[1:3] == ["--output", "json"]
         assert result.full_argv[3:5] == ["message", "list"]
 
+    def test_injected_args_are_inserted_before_user_args(
+        self, engine: PolicyEngine
+    ) -> None:
+        result = engine.evaluate("himalaya", ["message", "read", "42"])
+        assert result.full_argv[3:6] == ["message", "read", "--preview"]
+        assert result.full_argv[-1] == "42"
+
 
 class TestDenyPrecedence:
     """Test that deny rules take precedence and deny-by-default works."""
@@ -91,6 +100,16 @@ class TestFlagValidation:
     def test_flag_injection_rejected(self, engine: PolicyEngine) -> None:
         with pytest.raises(PolicyValidationError):
             engine.evaluate("himalaya", ["message", "list", "--exec", "rm -rf /"])
+
+    def test_standalone_flag_allowed(self, engine: PolicyEngine) -> None:
+        result = engine.evaluate("himalaya", ["message", "list", "--unread"])
+        assert result.rule_id == "list_messages"
+        assert "--unread" in result.full_argv
+
+    def test_standalone_flag_with_value_rejected(self, engine: PolicyEngine) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            engine.evaluate("himalaya", ["message", "list", "--unread=true"])
+        assert "does not take a value" in str(exc_info.value)
 
 
 class TestPositionalValidation:
@@ -137,3 +156,72 @@ class TestMoveWithFlags:
         assert "Archive" in result.full_argv
         assert "--account" in result.full_argv
         assert "work" in result.full_argv
+
+
+class TestVariadicPositionals:
+    """Test repeated tail positionals."""
+
+    @pytest.fixture
+    def variadic_engine(self) -> PolicyEngine:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: search_messages
+                    command: ["envelope", "list"]
+                    effect: allow
+                    flags:
+                      allowed: ["--account", "--folder", "--page", "--page-size"]
+                    positionals:
+                      - name: query
+                        pattern: "^[A-Za-z0-9_@.+:-]+$"
+                        variadic: true
+            """
+        )
+        return PolicyEngine(Config.model_validate(raw))
+
+    def test_variadic_tail_is_accepted(self, variadic_engine: PolicyEngine) -> None:
+        result = variadic_engine.evaluate(
+            "himalaya",
+            [
+                "envelope",
+                "list",
+                "subject",
+                "invoice",
+                "and",
+                "body",
+                "march",
+            ],
+        )
+        assert result.rule_id == "search_messages"
+        assert result.full_argv[-5:] == [
+            "subject",
+            "invoice",
+            "and",
+            "body",
+            "march",
+        ]
+
+    def test_variadic_tail_requires_at_least_one_value(
+        self, variadic_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            variadic_engine.evaluate("himalaya", ["envelope", "list"])
+        assert "Expected at least 1 positional arg" in str(exc_info.value)
+
+    def test_variadic_tail_validates_each_token(
+        self, variadic_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            variadic_engine.evaluate(
+                "himalaya", ["envelope", "list", "subject", "bad!"]
+            )
+        assert "pattern" in str(exc_info.value)

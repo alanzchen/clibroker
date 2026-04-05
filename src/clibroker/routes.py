@@ -170,11 +170,13 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
                     id=rule.id,
                     command=rule.command,
                     flags=rule.flags.allowed if rule.flags else [],
+                    standalone_flags=rule.flags.standalone if rule.flags else [],
                     positionals=[
                         ClientPositionalSchema(
                             name=pos.name,
                             pattern=pos.pattern,
                             enum=pos.enum,
+                            variadic=pos.variadic,
                         )
                         for pos in rule.positionals
                     ],

@@ -38,6 +38,7 @@ class ClientPositionalSchema(BaseModel):
     name: str
     pattern: str | None = None
     enum: list[str] | None = None
+    variadic: bool = False
 
 
 class ClientRuleSchema(BaseModel):
@@ -45,8 +46,9 @@ class ClientRuleSchema(BaseModel):
 
     id: str
     command: list[str]
-    flags: list[str] = []
-    positionals: list[ClientPositionalSchema] = []
+    flags: list[str] = Field(default_factory=list)
+    standalone_flags: list[str] = Field(default_factory=list)
+    positionals: list[ClientPositionalSchema] = Field(default_factory=list)
 
 
 class ClientToolSchema(BaseModel):

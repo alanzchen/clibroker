@@ -167,6 +167,20 @@ class TestFlagParserHardening:
             )
         assert "requires a value" in str(exc_info.value)
 
+    def test_standalone_flag_is_accepted(self, engine_with_flags: PolicyEngine) -> None:
+        """Standalone flags should not consume a following value."""
+        result = engine_with_flags.evaluate("himalaya", ["message", "list", "--unread"])
+        assert result.rule_id == "list_messages"
+        assert "--unread" in result.full_argv
+
+    def test_standalone_flag_equals_value_rejected(
+        self, engine_with_flags: PolicyEngine
+    ) -> None:
+        """Standalone flags should reject --flag=value syntax."""
+        with pytest.raises(PolicyValidationError) as exc_info:
+            engine_with_flags.evaluate("himalaya", ["message", "list", "--unread=true"])
+        assert "does not take a value" in str(exc_info.value)
+
 
 # ---------------------------------------------------------------------------
 # S-4: Deny rule subtree cascading
@@ -230,6 +244,38 @@ class TestDenySubtreeCascading:
             engine_with_subtree.evaluate(
                 "himalaya", ["message", "delete", "batch", "--dry-run", "yes"]
             )
+
+
+class TestConfigValidationExtensions:
+    """Validation for new standalone and variadic schema features."""
+
+    def test_overlapping_value_and_standalone_flags_rejected(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            Rule.model_validate(
+                {
+                    "id": "bad_flags",
+                    "command": ["message", "list"],
+                    "flags": {
+                        "allowed": ["--preview"],
+                        "standalone": ["--preview"],
+                    },
+                }
+            )
+        assert "must be disjoint" in str(exc_info.value)
+
+    def test_non_final_variadic_positional_rejected(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            Rule.model_validate(
+                {
+                    "id": "bad_variadic",
+                    "command": ["envelope", "list"],
+                    "positionals": [
+                        {"name": "query", "variadic": True},
+                        {"name": "tail"},
+                    ],
+                }
+            )
+        assert "Only the final positional may be variadic" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

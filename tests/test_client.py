@@ -7,9 +7,11 @@ import json
 import textwrap
 
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 
 from clibroker.app import create_app
+from clibroker.config import Config
 from clibroker.client import HttpBackend, load_client_config
 from clibroker.client.__main__ import main as client_main
 from clibroker.client.config import BrokerClientConfig, HTTPBackendConfig
@@ -63,6 +65,16 @@ class TestClientConfigEndpoint:
         assert "move_message" not in rule_ids
         assert "deny_delete" not in rule_ids
 
+        list_rule = next(
+            rule for rule in body["tools"][0]["rules"] if rule["id"] == "list_messages"
+        )
+        assert list_rule["standalone_flags"] == ["--unread"]
+
+        read_rule = next(
+            rule for rule in body["tools"][0]["rules"] if rule["id"] == "read_message"
+        )
+        assert "inject_args" not in read_rule
+
     @pytest.mark.asyncio
     async def test_operator_gets_move_rule(self, client: AsyncClient) -> None:
         resp = await client.get(
@@ -74,6 +86,51 @@ class TestClientConfigEndpoint:
         body = resp.json()
         rule_ids = {rule["id"] for rule in body["tools"][0]["rules"]}
         assert "move_message" in rule_ids
+
+    @pytest.mark.asyncio
+    async def test_client_config_exposes_variadic_positionals(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "test-reader-token"
+                    allow_rules: ["search_messages"]
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: search_messages
+                    command: ["envelope", "list"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^[A-Za-z0-9_@.+:-]+$"
+                        variadic: true
+            """
+        )
+        app = create_app(Config.model_validate(raw))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/client-config",
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+
+        assert resp.status_code == 200
+        rule = resp.json()["tools"][0]["rules"][0]
+        assert rule["positionals"] == [
+            {
+                "name": "query",
+                "pattern": "^[A-Za-z0-9_@.+:-]+$",
+                "enum": None,
+                "variadic": True,
+            }
+        ]
 
 
 class TestClientLocalConfig:

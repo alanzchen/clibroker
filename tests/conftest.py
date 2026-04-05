@@ -53,10 +53,12 @@ def make_config(
                 effect: allow
                 flags:
                   allowed: ["--account", "--folder", "--page"]
+                  standalone: ["--unread"]
                 positionals: []
               - id: read_message
                 command: ["message", "read"]
                 effect: allow
+                inject_args: ["--preview"]
                 flags:
                   allowed: ["--account", "--folder"]
                 positionals:
