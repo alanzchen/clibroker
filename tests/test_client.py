@@ -14,7 +14,11 @@ from clibroker.app import create_app
 from clibroker.config import Config
 from clibroker.client import HttpBackend, load_client_config
 from clibroker.client.__main__ import main as client_main
-from clibroker.client.config import BrokerClientConfig, HTTPBackendConfig
+from clibroker.client.config import (
+    BrokerClientConfig,
+    HTTPBackendConfig,
+    resolve_client_config_path,
+)
 from tests.conftest import make_config
 
 READER_TOKEN = "test-reader-token"
@@ -188,6 +192,61 @@ class TestClientLocalConfig:
         )
         assert backend.redacted_dict()["token"] == "<redacted>"
 
+    def test_resolve_client_config_path_prefers_explicit_path(self, tmp_path) -> None:
+        path = tmp_path / "client.yaml"
+        path.write_text("default_backend: local\nbackends: {local: {type: http, base_url: http://127.0.0.1:8080, token: literal-token}}\n")
+
+        resolved = resolve_client_config_path(path)
+
+        assert resolved == path
+
+    def test_resolve_client_config_path_uses_env_var(self, tmp_path, monkeypatch) -> None:
+        path = tmp_path / "env-client.yaml"
+        path.write_text("default_backend: local\nbackends: {local: {type: http, base_url: http://127.0.0.1:8080, token: literal-token}}\n")
+        monkeypatch.setenv("CLIBROKER_CLIENT_CONFIG", str(path))
+
+        resolved = resolve_client_config_path()
+
+        assert resolved == path
+
+    def test_resolve_client_config_path_prefers_openclaw_default(self, tmp_path, monkeypatch) -> None:
+        home = tmp_path / "home"
+        openclaw_dir = home / ".openclaw"
+        openclaw_dir.mkdir(parents=True)
+        path = openclaw_dir / "clibroker-client.yaml"
+        path.write_text("default_backend: local\nbackends: {local: {type: http, base_url: http://127.0.0.1:8080, token: literal-token}}\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("CLIBROKER_CLIENT_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+        resolved = resolve_client_config_path()
+
+        assert resolved == path
+
+    def test_resolve_client_config_path_falls_back_to_xdg(self, tmp_path, monkeypatch) -> None:
+        xdg = tmp_path / "xdg"
+        config_dir = xdg / "clibroker"
+        config_dir.mkdir(parents=True)
+        path = config_dir / "client.yaml"
+        path.write_text("default_backend: local\nbackends: {local: {type: http, base_url: http://127.0.0.1:8080, token: literal-token}}\n")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("CLIBROKER_CLIENT_CONFIG", raising=False)
+
+        resolved = resolve_client_config_path()
+
+        assert resolved == path
+
+    def test_resolve_client_config_path_raises_when_missing(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        monkeypatch.delenv("CLIBROKER_CLIENT_CONFIG", raising=False)
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            resolve_client_config_path()
+
+        assert "No client config found" in str(exc_info.value)
+
 
 class TestHttpBackend:
     """Direct client backend that talks to the broker server."""
@@ -254,6 +313,49 @@ class TestClientCLI:
         payload = json.loads(captured.out)
         assert payload["selected_backend"] == "local"
         assert payload["backend"]["token"] == "<redacted>"
+
+    def test_tools_command_uses_default_config_path(self, tmp_path, monkeypatch, capsys) -> None:
+        path = tmp_path / "client.yaml"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                default_backend: local
+                backends:
+                  local:
+                    type: http
+                    base_url: http://127.0.0.1:8080
+                    token: literal-token
+                """
+            )
+        )
+
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [],
+                    }
+                )
+
+        monkeypatch.setenv("CLIBROKER_CLIENT_CONFIG", str(path))
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(["tools"])
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert "Client: reader" in captured.out
 
     def test_tools_command(self, monkeypatch, capsys) -> None:
         remote = {

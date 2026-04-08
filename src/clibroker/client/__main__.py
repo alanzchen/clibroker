@@ -7,7 +7,12 @@ import asyncio
 import json
 import sys
 
-from . import ClientBackendError, build_backend, load_client_config
+from . import (
+    ClientBackendError,
+    build_backend,
+    load_client_config,
+    resolve_client_config_path,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,8 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--config",
         "-c",
-        required=True,
-        help="Path to the client YAML configuration file",
+        help=(
+            "Path to the client YAML configuration file. Defaults to "
+            "$CLIBROKER_CLIENT_CONFIG, ~/.openclaw/clibroker-client.yaml, "
+            "or ${XDG_CONFIG_HOME:-~/.config}/clibroker/client.yaml"
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -70,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    config = load_client_config(args.config)
+    config = load_client_config(resolve_client_config_path(args.config))
 
     if args.command == "config":
         return _show_config(config, args.backend)

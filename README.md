@@ -179,6 +179,19 @@ List tools visible to the configured token:
 .venv/bin/clibroker-client --config client.yaml tools
 ```
 
+The client also supports config discovery in this order:
+
+- `--config`
+- `CLIBROKER_CLIENT_CONFIG`
+- `~/.openclaw/clibroker-client.yaml`
+- `${XDG_CONFIG_HOME:-~/.config}/clibroker/client.yaml`
+
+So if your config is already in one of those default locations, you can simply run:
+
+```bash
+.venv/bin/clibroker-client tools
+```
+
 Forward an execute request to the server:
 
 ```bash

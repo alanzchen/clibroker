@@ -87,3 +87,30 @@ def load_client_config(path: str | Path) -> BrokerClientConfig:
             f"Client config file must be a YAML mapping, got {type(raw).__name__}"
         )
     return BrokerClientConfig.model_validate(raw)
+
+
+def resolve_client_config_path(path: str | Path | None = None) -> Path:
+    """Resolve a client config path from explicit arg, env, or defaults."""
+
+    if path is not None:
+        return Path(path).expanduser()
+
+    env_path = os.environ.get("CLIBROKER_CLIENT_CONFIG")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    candidates = [
+        Path("~/.openclaw/clibroker-client.yaml").expanduser(),
+        Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+        / "clibroker"
+        / "client.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(
+        "No client config found. Set --config, set CLIBROKER_CLIENT_CONFIG, "
+        f"or create one of: {searched}"
+    )

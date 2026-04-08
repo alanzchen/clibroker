@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from .backend_http import ClientBackendError, HttpBackend
-from .config import BrokerClientConfig, HTTPBackendConfig, load_client_config
+from .config import (
+    BrokerClientConfig,
+    HTTPBackendConfig,
+    load_client_config,
+    resolve_client_config_path,
+)
 
 
 def build_backend(
@@ -30,4 +35,5 @@ __all__ = [
     "HttpBackend",
     "build_backend",
     "load_client_config",
+    "resolve_client_config_path",
 ]
