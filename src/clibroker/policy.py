@@ -119,10 +119,17 @@ class PolicyEngine:
                 if rule.effect == "deny":
                     raise PolicyDenied(rule.id)
 
-        # Find a matching allow rule and validate
+        # Try all allow rules on the matched node. This lets a more specific
+        # rule with positionals succeed when a simpler sibling rule rejects the
+        # argv due to positional count.
+        last_validation_error: PolicyValidationError | None = None
         for rule in node.rules:
             if rule.effect == "allow":
-                validated_argv = self._validate_rule(rule, remaining)
+                try:
+                    validated_argv = self._validate_rule(rule, remaining)
+                except PolicyValidationError as exc:
+                    last_validation_error = exc
+                    continue
                 # Build the full argv: executable + default_args + command + validated remainder
                 full_argv = (
                     [tool_cfg.executable]
@@ -136,6 +143,9 @@ class PolicyEngine:
                     tool_config=tool_cfg,
                     full_argv=full_argv,
                 )
+
+        if last_validation_error is not None:
+            raise last_validation_error
 
         raise PolicyNoMatch(tool, argv)
 

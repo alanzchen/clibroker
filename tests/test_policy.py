@@ -225,3 +225,57 @@ class TestVariadicPositionals:
                 "himalaya", ["envelope", "list", "subject", "bad!"]
             )
         assert "pattern" in str(exc_info.value)
+
+
+class TestSiblingAllowRuleFallback:
+    """Test that sibling allow rules can fall through on validation failure."""
+
+    @pytest.fixture
+    def sibling_rule_engine(self) -> PolicyEngine:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: list_envelopes_plain
+                    command: ["envelope", "list"]
+                    effect: allow
+                    flags:
+                      allowed: ["--account", "--folder", "--page", "--page-size"]
+                  - id: list_envelopes
+                    command: ["envelope", "list"]
+                    effect: allow
+                    flags:
+                      allowed: ["--account", "--folder", "--page", "--page-size"]
+                    positionals:
+                      - name: query
+                        pattern: "^[A-Za-z0-9_@.+:,-]+$"
+                        variadic: true
+            """
+        )
+        return PolicyEngine(Config.model_validate(raw))
+
+    def test_plain_rule_still_handles_no_query(
+        self, sibling_rule_engine: PolicyEngine
+    ) -> None:
+        result = sibling_rule_engine.evaluate(
+            "himalaya", ["envelope", "list", "--folder", "INBOX"]
+        )
+        assert result.rule_id == "list_envelopes_plain"
+
+    def test_query_rule_handles_search_tail_when_plain_rejects(
+        self, sibling_rule_engine: PolicyEngine
+    ) -> None:
+        result = sibling_rule_engine.evaluate(
+            "himalaya",
+            ["envelope", "list", "subject", "review", "order", "by", "date", "desc"],
+        )
+        assert result.rule_id == "list_envelopes"
+        assert result.full_argv[-6:] == ["subject", "review", "order", "by", "date", "desc"]
