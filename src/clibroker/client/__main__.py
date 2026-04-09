@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         dest="config_command", required=True
     )
     config_subparsers.add_parser("show", help="Show the selected local backend config")
+    config_subparsers.add_parser("list", help="List configured backends")
 
     args = parser.parse_args(argv)
 
@@ -81,7 +82,11 @@ async def _run(args: argparse.Namespace) -> int:
     config = load_client_config(resolve_client_config_path(args.config))
 
     if args.command == "config":
-        return _show_config(config, args.backend)
+        if args.config_command == "show":
+            return _show_config(config, args.backend)
+        if args.config_command == "list":
+            return _list_backends(config)
+        raise ValueError(f"Unsupported config command: {args.config_command}")
 
     backend = build_backend(config, args.backend)
 
@@ -130,6 +135,22 @@ def _show_config(config, backend_name: str | None) -> int:  # noqa: ANN001
         "default_backend": config.default_backend,
         "selected_backend": backend_name or config.default_backend,
         "backend": backend_cfg.redacted_dict(),
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _list_backends(config) -> int:  # noqa: ANN001
+    payload = {
+        "default_backend": config.default_backend,
+        "backends": [
+            {
+                "name": name,
+                "is_default": name == config.default_backend,
+                "config": backend.redacted_dict(),
+            }
+            for name, backend in config.list_backends()
+        ],
     }
     print(json.dumps(payload, indent=2))
     return 0

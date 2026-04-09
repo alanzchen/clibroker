@@ -74,7 +74,15 @@ class BrokerClientConfig(BaseModel):
         try:
             return self.backends[backend_name]
         except KeyError as exc:
-            raise KeyError(f"Unknown backend '{backend_name}'") from exc
+            available = ", ".join(sorted(self.backends))
+            raise KeyError(
+                f"Unknown backend '{backend_name}'. Available backends: {available}"
+            ) from exc
+
+    def list_backends(self) -> list[tuple[str, HTTPBackendConfig]]:
+        """Return configured backends in stable name order."""
+
+        return sorted(self.backends.items(), key=lambda item: item[0])
 
 
 def load_client_config(path: str | Path) -> BrokerClientConfig:

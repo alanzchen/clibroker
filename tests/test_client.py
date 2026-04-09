@@ -185,6 +185,55 @@ class TestClientLocalConfig:
             load_client_config(path)
         assert "default_backend 'missing' does not exist" in str(exc_info.value)
 
+    def test_get_backend_selects_named_backend(self, tmp_path) -> None:
+        path = tmp_path / "client.yaml"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                default_backend: local
+                backends:
+                  local:
+                    type: http
+                    base_url: http://127.0.0.1:8080
+                    token: literal-local-token
+                  review:
+                    type: http
+                    base_url: http://127.0.0.1:8081
+                    token: literal-review-token
+                """
+            )
+        )
+
+        config = load_client_config(path)
+
+        assert config.get_backend("review").base_url == "http://127.0.0.1:8081"
+
+    def test_get_backend_error_lists_available_backends(self, tmp_path) -> None:
+        path = tmp_path / "client.yaml"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                default_backend: local
+                backends:
+                  local:
+                    type: http
+                    base_url: http://127.0.0.1:8080
+                    token: literal-local-token
+                  review:
+                    type: http
+                    base_url: http://127.0.0.1:8081
+                    token: literal-review-token
+                """
+            )
+        )
+
+        config = load_client_config(path)
+
+        with pytest.raises(KeyError) as exc_info:
+            config.get_backend("missing")
+
+        assert "Available backends: local, review" in str(exc_info.value)
+
     def test_literal_token_is_redacted_for_display(self) -> None:
         backend = HTTPBackendConfig(
             base_url="http://127.0.0.1:8080",
@@ -314,6 +363,35 @@ class TestClientCLI:
         assert payload["selected_backend"] == "local"
         assert payload["backend"]["token"] == "<redacted>"
 
+    def test_config_list(self, tmp_path, capsys) -> None:
+        path = tmp_path / "client.yaml"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                default_backend: local
+                backends:
+                  local:
+                    type: http
+                    base_url: http://127.0.0.1:8080
+                    token: literal-token
+                  review:
+                    type: http
+                    base_url: http://127.0.0.1:8081
+                    token: env:REVIEW_TOKEN
+                """
+            )
+        )
+
+        exit_code = client_main(["--config", str(path), "config", "list"])
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["default_backend"] == "local"
+        assert [item["name"] for item in payload["backends"]] == ["local", "review"]
+        assert payload["backends"][0]["is_default"] is True
+        assert payload["backends"][1]["config"]["token"] == "env:REVIEW_TOKEN"
+
     def test_tools_command_uses_default_config_path(self, tmp_path, monkeypatch, capsys) -> None:
         path = tmp_path / "client.yaml"
         path.write_text(
@@ -356,6 +434,63 @@ class TestClientCLI:
 
         assert exit_code == 0
         assert "Client: reader" in captured.out
+
+    def test_tools_command_honors_backend_override(self, monkeypatch, capsys) -> None:
+        remote = {
+            "version": "0.1.0",
+            "client_name": "reader",
+            "execute_url": "/execute",
+            "token_info_url": "/token-info",
+            "mcp_url": f"/mcp/{READER_SLUG}/",
+            "sse_url": f"/sse/{READER_SLUG}/",
+            "tools": [],
+        }
+
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(remote)
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    },
+                    "review": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8081",
+                        "token": "literal-token",
+                    },
+                },
+            }
+        )
+
+        observed_backend_name = None
+
+        def fake_build_backend(config, backend_name=None):
+            nonlocal observed_backend_name
+            observed_backend_name = backend_name
+            return FakeBackend()
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            fake_build_backend,
+        )
+
+        exit_code = client_main(["--config", "ignored.yaml", "--backend", "review", "tools"])
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert "Client: reader" in captured.out
+        assert observed_backend_name == "review"
 
     def test_tools_command(self, monkeypatch, capsys) -> None:
         remote = {

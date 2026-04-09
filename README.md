@@ -149,6 +149,12 @@ backends:
     token: env:CLIBROKER_TOKEN_READER
     timeout_s: 30.0
     verify_tls: true
+  review:
+    type: http
+    base_url: http://127.0.0.1:8081
+    token: env:CLIBROKER_TOKEN_REVIEW
+    timeout_s: 30.0
+    verify_tls: true
 ```
 
 Current backend types:
@@ -192,6 +198,12 @@ So if your config is already in one of those default locations, you can simply r
 .venv/bin/clibroker-client tools
 ```
 
+Select a non-default server backend with `--backend`:
+
+```bash
+.venv/bin/clibroker-client --backend review tools
+```
+
 Forward an execute request to the server:
 
 ```bash
@@ -202,6 +214,12 @@ Show the selected local backend config with secrets redacted:
 
 ```bash
 .venv/bin/clibroker-client --config client.yaml config show
+```
+
+List all configured backends:
+
+```bash
+.venv/bin/clibroker-client config list
 ```
 
 ## HTTP API

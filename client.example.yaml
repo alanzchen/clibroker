@@ -10,3 +10,9 @@ backends:
     token: env:CLIBROKER_TOKEN_READER
     timeout_s: 30.0
     verify_tls: true
+  review:
+    type: http
+    base_url: http://127.0.0.1:8081
+    token: env:CLIBROKER_TOKEN_REVIEW
+    timeout_s: 30.0
+    verify_tls: true
