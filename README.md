@@ -204,6 +204,14 @@ Select a non-default server backend with `--backend`:
 .venv/bin/clibroker-client --backend review tools
 ```
 
+If you do not pass `--backend`, the client behaves like this:
+
+- if only one backend is configured, it uses that backend
+- if multiple backends are configured and a tool name exists in exactly one backend, `execute` auto-selects that backend
+- if the same tool name exists in multiple backends, `execute` fails and tells you to rerun with `--backend <name>`
+
+With multiple configured backends, `tools --json` returns an aggregate view that includes a `tool_index` showing which backends expose each tool and whether the tool name is conflicted.
+
 Forward an execute request to the server:
 
 ```bash

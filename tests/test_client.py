@@ -340,6 +340,24 @@ class TestHttpBackend:
 class TestClientCLI:
     """CLI entrypoint behavior for the client package."""
 
+    @staticmethod
+    def _make_remote(client_name: str, tool_names: list[str]) -> dict[str, object]:
+        return {
+            "version": "0.1.0",
+            "client_name": client_name,
+            "execute_url": "/execute",
+            "token_info_url": "/token-info",
+            "mcp_url": f"/mcp/{READER_SLUG}/",
+            "sse_url": f"/sse/{READER_SLUG}/",
+            "tools": [
+                {
+                    "name": tool_name,
+                    "rules": [],
+                }
+                for tool_name in tool_names
+            ],
+        }
+
     def test_config_show(self, tmp_path, capsys) -> None:
         path = tmp_path / "client.yaml"
         path.write_text(
@@ -436,15 +454,7 @@ class TestClientCLI:
         assert "Client: reader" in captured.out
 
     def test_tools_command_honors_backend_override(self, monkeypatch, capsys) -> None:
-        remote = {
-            "version": "0.1.0",
-            "client_name": "reader",
-            "execute_url": "/execute",
-            "token_info_url": "/token-info",
-            "mcp_url": f"/mcp/{READER_SLUG}/",
-            "sse_url": f"/sse/{READER_SLUG}/",
-            "tools": [],
-        }
+        remote = self._make_remote("reader", [])
 
         class FakeBackend:
             async def fetch_config(self):
@@ -491,6 +501,186 @@ class TestClientCLI:
         assert exit_code == 0
         assert "Client: reader" in captured.out
         assert observed_backend_name == "review"
+
+    def test_tools_command_aggregates_multiple_backends_as_json(
+        self, monkeypatch, capsys
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    },
+                    "review": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8081",
+                        "token": "literal-token",
+                    },
+                },
+            }
+        )
+
+        remotes = {
+            "local": self._make_remote("local-reader", ["himalaya", "calendar"]),
+            "review": self._make_remote("review-reader", ["himalaya", "notes"]),
+        }
+
+        class FakeBackend:
+            def __init__(self, backend_name: str) -> None:
+                self.backend_name = backend_name
+
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(remotes[self.backend_name])
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(backend_name or config.default_backend),
+        )
+
+        exit_code = client_main(["--config", "ignored.yaml", "tools", "--json"])
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["default_backend"] == "local"
+        assert [item["name"] for item in payload["tool_index"]] == [
+            "calendar",
+            "himalaya",
+            "notes",
+        ]
+        himalaya = next(item for item in payload["tool_index"] if item["name"] == "himalaya")
+        assert himalaya["backends"] == ["local", "review"]
+        assert himalaya["conflict"] is True
+
+    def test_execute_command_auto_selects_unique_backend(self, monkeypatch, capsys) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    },
+                    "review": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8081",
+                        "token": "literal-token",
+                    },
+                },
+            }
+        )
+
+        remotes = {
+            "local": self._make_remote("local-reader", ["himalaya"]),
+            "review": self._make_remote("review-reader", ["calendar"]),
+        }
+        executed_backend = None
+
+        class FakeBackend:
+            def __init__(self, backend_name: str) -> None:
+                self.backend_name = backend_name
+
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(remotes[self.backend_name])
+
+            async def execute(self, tool: str, argv: list[str]):
+                nonlocal executed_backend
+                from clibroker.models import ExecuteResponse
+
+                executed_backend = self.backend_name
+                return ExecuteResponse(
+                    ok=True,
+                    exit_code=0,
+                    stdout={"tool": tool, "argv": argv, "backend": self.backend_name},
+                    stderr="",
+                    duration_ms=1.23,
+                    matched_rule="calendar_list",
+                    timed_out=False,
+                )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(backend_name or config.default_backend),
+        )
+
+        exit_code = client_main(
+            ["--config", "ignored.yaml", "execute", "calendar", "--", "list"]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["stdout"]["backend"] == "review"
+        assert executed_backend == "review"
+
+    def test_execute_command_requires_backend_for_conflicting_tool(
+        self, monkeypatch, capsys
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    },
+                    "review": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8081",
+                        "token": "literal-token",
+                    },
+                },
+            }
+        )
+
+        remotes = {
+            "local": self._make_remote("local-reader", ["himalaya"]),
+            "review": self._make_remote("review-reader", ["himalaya"]),
+        }
+
+        class FakeBackend:
+            def __init__(self, backend_name: str) -> None:
+                self.backend_name = backend_name
+
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(remotes[self.backend_name])
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called when tool is ambiguous")
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(backend_name or config.default_backend),
+        )
+
+        exit_code = client_main(
+            ["--config", "ignored.yaml", "execute", "himalaya", "--", "folder", "list"]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "exists in multiple backends (local, review)" in captured.err
+        assert "Specify --backend <name>" in captured.err
 
     def test_tools_command(self, monkeypatch, capsys) -> None:
         remote = {
