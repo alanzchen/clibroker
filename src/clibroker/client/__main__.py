@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from collections import defaultdict
 
@@ -14,6 +15,7 @@ from . import (
     load_client_config,
     resolve_client_config_path,
 )
+from ..models import ClientGlobalArgPatternSchema, ClientToolSchema
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,6 +116,8 @@ async def _run(args: argparse.Namespace) -> int:
             forwarded_argv = forwarded_argv[1:]
 
         backend = await _resolve_backend_for_tool(config, args.tool, args.backend)
+        remote = await backend.fetch_config()
+        _validate_client_argv(args.tool, forwarded_argv, remote.tools)
         result = await backend.execute(args.tool, forwarded_argv)
         print(json.dumps(result.model_dump(), indent=2))
         if result.ok:
@@ -203,6 +207,12 @@ def _print_remote_tools(remote) -> None:  # noqa: ANN001
     print(f"Execute URL: {remote.execute_url}")
     for tool in remote.tools:
         print(tool.name)
+        if tool.argv_normalization and tool.argv_normalization.patterns:
+            globals_desc = ", ".join(
+                _render_global_pattern(pattern)
+                for pattern in tool.argv_normalization.patterns
+            )
+            print(f"  argv_normalization: {globals_desc}")
         for rule in tool.rules:
             parts = [f"  {rule.id}: {' '.join(rule.command)}"]
             if rule.flags:
@@ -257,6 +267,94 @@ def _print_aggregated_tools(config, remotes) -> None:  # noqa: ANN001
     for tool in payload["tool_index"]:
         suffix = " [conflict: specify --backend]" if tool["conflict"] else ""
         print(f"- {tool['name']} ({', '.join(tool['backends'])}){suffix}")
+
+
+def _validate_client_argv(
+    tool_name: str, argv: list[str], tools: list[ClientToolSchema]
+) -> None:
+    tool = next((tool for tool in tools if tool.name == tool_name), None)
+    if tool is None or tool.argv_normalization is None:
+        return
+
+    for pattern in tool.argv_normalization.patterns:
+        malformed = _find_malformed_global_args(argv, pattern)
+        if malformed:
+            raise RuntimeError(
+                f"Invalid global arg usage for tool '{tool_name}': "
+                f"{', '.join(malformed)} does not match the advertised pattern "
+                f"{pattern.key_pattern}={pattern.value_pattern or '.+'}."
+            )
+        duplicates = _find_duplicate_global_args(argv, pattern)
+        if duplicates:
+            canonical = (
+                f"{duplicates[0]} <command> ..."
+                if pattern.canonical_position == "before_command"
+                else f"<command> ... {duplicates[0]}"
+            )
+            raise RuntimeError(
+                f"Ambiguous global arg usage for tool '{tool_name}': "
+                f"{', '.join(duplicates)}. Canonical form starts with '{canonical}'."
+            )
+
+
+def _find_duplicate_global_args(
+    argv: list[str],
+    pattern: ClientGlobalArgPatternSchema,
+) -> list[str]:
+    if pattern.multiple:
+        return []
+
+    matches: list[str] = []
+    seen_key: str | None = None
+    seen_value: str | None = None
+    for arg in argv:
+        if "=" not in arg:
+            continue
+        key, _, value = arg.partition("=")
+        if not re.fullmatch(pattern.key_pattern, key):
+            continue
+        if pattern.value_pattern is not None and not re.fullmatch(
+            pattern.value_pattern, value
+        ):
+            continue
+        if seen_key is None:
+            seen_key = key
+            seen_value = value
+            matches.append(arg)
+            continue
+        if seen_key == key:
+            matches.append(arg)
+            if seen_value != value:
+                return matches
+    return matches if len(matches) > 1 else []
+
+
+def _find_malformed_global_args(
+    argv: list[str],
+    pattern: ClientGlobalArgPatternSchema,
+) -> list[str]:
+    malformed: list[str] = []
+    for arg in argv:
+        if "=" not in arg:
+            continue
+        key, _, value = arg.partition("=")
+        if not re.fullmatch(pattern.key_pattern, key):
+            continue
+        if pattern.value_pattern is not None and not re.fullmatch(
+            pattern.value_pattern, value
+        ):
+            malformed.append(arg)
+    return malformed
+
+
+def _render_global_pattern(pattern: ClientGlobalArgPatternSchema) -> str:
+    positions = "/".join(pattern.allow_positions)
+    canonical = pattern.canonical_position
+    multiple = "multi" if pattern.multiple else "single"
+    return (
+        f"{pattern.kind}:{pattern.key_pattern}=... "
+        f"[allow={positions}, canonical={canonical}, {multiple}]"
+    )
 
 
 if __name__ == "__main__":

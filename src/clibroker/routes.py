@@ -13,6 +13,8 @@ from .audit import get_audit_logger
 from .auth import AuthenticatedClient, Authenticator
 from .file_sharing import FileShareError, FileShareService
 from .models import (
+    ClientArgvNormalizationSchema,
+    ClientGlobalArgPatternSchema,
     ClientConfigResponse,
     ClientFileShareSchema,
     ClientPositionalSchema,
@@ -192,12 +194,33 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
             for share in file_shares.get_client_shares(tool_name, allowed_rule_ids)
         ]
 
+        argv_normalization = None
+        if (
+            tool_cfg.argv_normalization is not None
+            and tool_cfg.argv_normalization.patterns
+        ):
+            argv_normalization = ClientArgvNormalizationSchema(
+                patterns=[
+                    ClientGlobalArgPatternSchema(
+                        id=pattern.id,
+                        kind=pattern.kind,
+                        key_pattern=pattern.key_pattern,
+                        value_pattern=pattern.value_pattern,
+                        canonical_position=pattern.canonical_position,
+                        allow_positions=list(pattern.allow_positions),
+                        multiple=pattern.multiple,
+                    )
+                    for pattern in tool_cfg.argv_normalization.patterns
+                ]
+            )
+
         if rules or client_file_shares:
             tools.append(
                 ClientToolSchema(
                     name=tool_name,
                     rules=rules,
                     file_shares=client_file_shares,
+                    argv_normalization=argv_normalization,
                 )
             )
 
