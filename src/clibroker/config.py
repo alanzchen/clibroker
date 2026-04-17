@@ -44,6 +44,52 @@ class PositionalArg(BaseModel):
         return v
 
 
+class GlobalArgPattern(BaseModel):
+    """A reorderable global argument matcher for a tool."""
+
+    id: str
+    kind: Literal["key_value"] = "key_value"
+    key_pattern: str
+    value_pattern: str | None = None
+    canonical_position: Literal["before_command"] = "before_command"
+    allow_positions: list[Literal["before_command", "after_command"]] = Field(
+        default_factory=lambda: ["before_command"]
+    )
+    multiple: bool = False
+
+    @field_validator("key_pattern", "value_pattern")
+    @classmethod
+    def _compile_global_patterns(cls, v: str | None) -> str | None:
+        if v is not None:
+            re.compile(v)
+        return v
+
+    @model_validator(mode="after")
+    def _validate_position_policy(self) -> "GlobalArgPattern":
+        if self.canonical_position not in self.allow_positions:
+            raise ValueError(
+                "canonical_position must be included in allow_positions"
+            )
+        return self
+
+
+class ArgvNormalizationConfig(BaseModel):
+    """Tool-level argv normalization settings."""
+
+    patterns: list[GlobalArgPattern] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_pattern_ids_unique(self) -> "ArgvNormalizationConfig":
+        seen: set[str] = set()
+        for pattern in self.patterns:
+            if pattern.id in seen:
+                raise ValueError(
+                    f"Duplicate argv normalization pattern id '{pattern.id}'"
+                )
+            seen.add(pattern.id)
+        return self
+
+
 class Rule(BaseModel):
     """A single policy rule attached to a command path."""
 
@@ -77,6 +123,7 @@ class ToolConfig(BaseModel):
     working_dir: str | None = None
     timeout_s: float = 30.0
     max_output_bytes: int = 1_048_576  # 1 MB
+    argv_normalization: ArgvNormalizationConfig | None = None
     rules: list[Rule]
 
     @field_validator("executable")

@@ -106,3 +106,23 @@ tools:
       - id: deny_delete
         command: ["message", "delete"]
         effect: deny
+
+  obsidian:
+    executable: /usr/local/bin/obsidian
+    argv_normalization:
+      patterns:
+        - id: vault
+          kind: key_value
+          key_pattern: "^vault$"
+          value_pattern: "^[A-Za-z0-9_. -]+$"
+          canonical_position: before_command
+          allow_positions: ["before_command", "after_command"]
+          multiple: false
+    rules:
+      - id: vault_info
+        command: ["vault"]
+        effect: allow
+        positionals:
+          - name: args
+            pattern: "^.+$"
+            variadic: true

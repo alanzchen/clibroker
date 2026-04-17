@@ -51,11 +51,30 @@ class ClientRuleSchema(BaseModel):
     positionals: list[ClientPositionalSchema] = Field(default_factory=list)
 
 
+class ClientGlobalArgPatternSchema(BaseModel):
+    """A reorderable global-arg pattern exposed to clients."""
+
+    id: str
+    kind: str
+    key_pattern: str
+    value_pattern: str | None = None
+    canonical_position: str
+    allow_positions: list[str] = Field(default_factory=list)
+    multiple: bool = False
+
+
+class ClientArgvNormalizationSchema(BaseModel):
+    """Tool-level argv normalization metadata exposed to clients."""
+
+    patterns: list[ClientGlobalArgPatternSchema] = Field(default_factory=list)
+
+
 class ClientToolSchema(BaseModel):
     """A token-scoped tool schema for the client discovery endpoint."""
 
     name: str
     rules: list[ClientRuleSchema]
+    argv_normalization: ClientArgvNormalizationSchema | None = None
 
 
 class ClientConfigResponse(BaseModel):

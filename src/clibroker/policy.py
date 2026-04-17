@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .config import Config, PositionalArg, Rule, ToolConfig
+from .config import (
+    ArgvNormalizationConfig,
+    Config,
+    GlobalArgPattern,
+    PositionalArg,
+    Rule,
+    ToolConfig,
+)
 
 
 class PolicyError(Exception):
@@ -45,6 +52,7 @@ class PolicyResult:
     rule_id: str
     tool_config: ToolConfig
     full_argv: list[str]  # the complete argv vector to execute
+    normalized_argv: list[str]
 
 
 @dataclass
@@ -53,6 +61,25 @@ class _TreeNode:
 
     children: dict[str, _TreeNode] = field(default_factory=dict)
     rules: list[Rule] = field(default_factory=list)
+
+
+@dataclass
+class _MatchedGlobalArg:
+    """A global arg matched against a tool normalization pattern."""
+
+    pattern: GlobalArgPattern
+    arg: str
+    key: str
+    value: str
+
+
+@dataclass
+class _NormalizedArgv:
+    """Normalized argv split into leading globals and command argv."""
+
+    leading_global_args: list[str]
+    command_argv: list[str]
+    matched_globals: list[_MatchedGlobalArg] = field(default_factory=list)
 
 
 class PolicyEngine:
@@ -92,10 +119,15 @@ class PolicyEngine:
         tool_cfg = self._config.tools[tool]
         tree = self._trees[tool]
 
+        normalization = tool_cfg.argv_normalization
+        leading = self._split_leading_global_args(normalization, argv)
+        leading_global_args = leading.leading_global_args
+        command_argv = leading.command_argv
+
         # Walk the command tree to find matching node
         node = tree
         consumed = 0
-        for part in argv:
+        for part in command_argv:
             if part in node.children:
                 node = node.children[part]
                 consumed += 1
@@ -106,7 +138,14 @@ class PolicyEngine:
             raise PolicyNoMatch(tool, argv)
 
         # Remaining argv after command path
-        remaining = argv[consumed:]
+        remaining = command_argv[consumed:]
+        normalized_after_command = self._normalize_after_command_args(
+            normalization, remaining
+        )
+        self._validate_global_arg_matches(
+            leading.matched_globals + normalized_after_command.matched_globals
+        )
+        remaining = normalized_after_command.command_argv
 
         # Check deny rules on the matched node AND all ancestor nodes.
         # A deny on ["message", "delete"] cascades to deeper commands
@@ -114,7 +153,7 @@ class PolicyEngine:
         # allow rule cannot silently bypass a parent deny.
         walk = tree
         for depth in range(consumed):
-            walk = walk.children[argv[depth]]
+            walk = walk.children[command_argv[depth]]
             for rule in walk.rules:
                 if rule.effect == "deny":
                     raise PolicyDenied(rule.id)
@@ -134,6 +173,8 @@ class PolicyEngine:
                 full_argv = (
                     [tool_cfg.executable]
                     + tool_cfg.default_args
+                    + leading_global_args
+                    + normalized_after_command.leading_global_args
                     + rule.command
                     + rule.inject_args
                     + validated_argv
@@ -142,12 +183,130 @@ class PolicyEngine:
                     rule_id=rule.id,
                     tool_config=tool_cfg,
                     full_argv=full_argv,
+                    normalized_argv=leading_global_args
+                    + normalized_after_command.leading_global_args
+                    + rule.command
+                    + normalized_after_command.command_argv,
                 )
 
         if last_validation_error is not None:
             raise last_validation_error
 
         raise PolicyNoMatch(tool, argv)
+
+    def _split_leading_global_args(
+        self,
+        normalization: ArgvNormalizationConfig | None,
+        argv: list[str],
+    ) -> _NormalizedArgv:
+        """Split configured global args that appear before the command path."""
+        if normalization is None or not normalization.patterns:
+            return _NormalizedArgv(leading_global_args=[], command_argv=argv)
+
+        leading_matches: list[_MatchedGlobalArg] = []
+        index = 0
+        while index < len(argv):
+            match = self._match_global_arg(normalization, argv[index])
+            if match is None:
+                break
+            if "before_command" not in match.pattern.allow_positions:
+                raise PolicyValidationError(
+                    match.pattern.id,
+                    f"Global arg '{argv[index]}' is not allowed before the command",
+                )
+            leading_matches.append(match)
+            index += 1
+
+        return _NormalizedArgv(
+            leading_global_args=[match.arg for match in leading_matches],
+            command_argv=argv[index:],
+            matched_globals=leading_matches,
+        )
+
+    def _normalize_after_command_args(
+        self,
+        normalization: ArgvNormalizationConfig | None,
+        argv: list[str],
+    ) -> "_NormalizedArgv":
+        """Normalize configured global args that appear after the command path."""
+        if normalization is None or not normalization.patterns:
+            return _NormalizedArgv(leading_global_args=[], command_argv=argv)
+
+        matched_globals: list[_MatchedGlobalArg] = []
+        filtered_argv: list[str] = []
+        for arg in argv:
+            match = self._match_global_arg(normalization, arg)
+            if match is None:
+                filtered_argv.append(arg)
+                continue
+            if "after_command" not in match.pattern.allow_positions:
+                raise PolicyValidationError(
+                    match.pattern.id,
+                    f"Global arg '{arg}' is not allowed after the command",
+                )
+            matched_globals.append(match)
+
+        return _NormalizedArgv(
+            leading_global_args=[match.arg for match in matched_globals],
+            command_argv=filtered_argv,
+            matched_globals=matched_globals,
+        )
+
+    def _match_global_arg(
+        self,
+        normalization: ArgvNormalizationConfig,
+        arg: str,
+    ) -> "_MatchedGlobalArg | None":
+        """Return a matched global-arg descriptor or ``None``."""
+        if "=" not in arg:
+            return None
+
+        key, _, value = arg.partition("=")
+        matched_pattern: GlobalArgPattern | None = None
+        for pattern in normalization.patterns:
+            if pattern.kind != "key_value":
+                continue
+            if not re.fullmatch(pattern.key_pattern, key):
+                continue
+            if pattern.value_pattern is not None and not re.fullmatch(
+                pattern.value_pattern, value
+            ):
+                raise PolicyValidationError(
+                    pattern.id,
+                    f"Global arg '{arg}' value '{value}' does not match pattern: {pattern.value_pattern}",
+                )
+            matched_pattern = pattern
+            break
+
+        if matched_pattern is None:
+            return None
+
+        return _MatchedGlobalArg(pattern=matched_pattern, arg=arg, key=key, value=value)
+
+    def _validate_global_arg_matches(
+        self,
+        matches: list["_MatchedGlobalArg"],
+    ) -> None:
+        """Reject ambiguous or conflicting normalized global args."""
+        seen_by_pattern: dict[str, _MatchedGlobalArg] = {}
+        seen_by_key: dict[str, _MatchedGlobalArg] = {}
+        for match in matches:
+            prior = seen_by_pattern.get(match.pattern.id)
+            prior_key = seen_by_key.get(match.key)
+            if prior_key is None:
+                seen_by_key[match.key] = match
+            elif prior_key.value != match.value:
+                raise PolicyValidationError(
+                    match.pattern.id,
+                    f"Conflicting global args '{prior_key.arg}' and '{match.arg}' are not allowed",
+                )
+            if prior is not None and not match.pattern.multiple:
+                raise PolicyValidationError(
+                    match.pattern.id,
+                    f"Duplicate global arg '{match.arg}' is not allowed; canonical form is '{prior.arg}' before the command",
+                )
+            if prior is None:
+                seen_by_pattern[match.pattern.id] = match
 
     def _validate_rule(self, rule: Rule, remaining: list[str]) -> list[str]:
         """Validate remaining argv against a rule's flag/positional constraints.
