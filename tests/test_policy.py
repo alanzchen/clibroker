@@ -64,6 +64,110 @@ class TestCommandTreeMatching:
         assert result.full_argv[-1] == "42"
 
 
+class TestArgvNormalization:
+    """Test tool-level argv normalization for reorderable globals."""
+
+    @pytest.fixture
+    def obsidian_engine(self) -> PolicyEngine:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              obsidian:
+                executable: "/usr/bin/echo"
+                default_args: []
+                argv_normalization:
+                  patterns:
+                    - id: vault
+                      kind: key_value
+                      key_pattern: "^vault$"
+                      value_pattern: "^[A-Za-z0-9_. -]+$"
+                      canonical_position: before_command
+                      allow_positions: ["before_command", "after_command"]
+                      multiple: false
+                rules:
+                  - id: search_plain
+                    command: ["search"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^query=.+$"
+            """
+        )
+        return PolicyEngine(Config.model_validate(raw))
+
+    def test_leading_global_arg_is_preserved_before_command(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        result = obsidian_engine.evaluate(
+            "obsidian", ["vault=Main", "search", "query=thyroid"]
+        )
+        assert result.rule_id == "search_plain"
+        assert result.normalized_argv == ["vault=Main", "search", "query=thyroid"]
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "vault=Main",
+            "search",
+            "query=thyroid",
+        ]
+
+    def test_after_command_global_arg_is_normalized_before_command(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        result = obsidian_engine.evaluate(
+            "obsidian", ["search", "vault=Main", "query=thyroid"]
+        )
+        assert result.rule_id == "search_plain"
+        assert result.normalized_argv == ["vault=Main", "search", "query=thyroid"]
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "vault=Main",
+            "search",
+            "query=thyroid",
+        ]
+
+    def test_non_matching_key_value_is_not_reclassified(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyNoMatch):
+            obsidian_engine.evaluate(
+                "obsidian", ["profile=work", "search", "query=thyroid"]
+            )
+
+    def test_duplicate_global_args_are_rejected(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            obsidian_engine.evaluate(
+                "obsidian",
+                ["vault=Main", "search", "query=thyroid", "vault=Main"],
+            )
+        assert "Duplicate global arg" in str(exc_info.value)
+
+    def test_conflicting_global_args_are_rejected(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            obsidian_engine.evaluate(
+                "obsidian",
+                ["vault=Main", "search", "query=thyroid", "vault=Other"],
+            )
+        assert "Conflicting global args" in str(exc_info.value)
+
+    def test_malformed_configured_global_arg_is_rejected(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            obsidian_engine.evaluate(
+                "obsidian", ["search", "query=thyroid", "vault=bad/value"]
+            )
+        assert "does not match pattern" in str(exc_info.value)
+
+
 class TestDenyPrecedence:
     """Test that deny rules take precedence and deny-by-default works."""
 

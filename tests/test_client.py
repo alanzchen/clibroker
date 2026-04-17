@@ -136,6 +136,64 @@ class TestClientConfigEndpoint:
             }
         ]
 
+    @pytest.mark.asyncio
+    async def test_client_config_exposes_argv_normalization(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "test-reader-token"
+                    allow_rules: ["search_messages"]
+            tools:
+              obsidian:
+                executable: "/usr/bin/echo"
+                default_args: []
+                argv_normalization:
+                  patterns:
+                    - id: vault
+                      kind: key_value
+                      key_pattern: "^vault$"
+                      value_pattern: "^[A-Za-z0-9_. -]+$"
+                      canonical_position: before_command
+                      allow_positions: ["before_command", "after_command"]
+                      multiple: false
+                rules:
+                  - id: search_messages
+                    command: ["search"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^query=.+$"
+            """
+        )
+        app = create_app(Config.model_validate(raw))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/client-config",
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+
+        assert resp.status_code == 200
+        tool = resp.json()["tools"][0]
+        assert tool["argv_normalization"] == {
+            "patterns": [
+                {
+                    "id": "vault",
+                    "kind": "key_value",
+                    "key_pattern": "^vault$",
+                    "value_pattern": "^[A-Za-z0-9_. -]+$",
+                    "canonical_position": "before_command",
+                    "allow_positions": ["before_command", "after_command"],
+                    "multiple": False,
+                }
+            ]
+        }
+
 
 class TestClientLocalConfig:
     """Client-side YAML config parsing and env token resolution."""
@@ -693,6 +751,22 @@ class TestClientCLI:
             "tools": [
                 {
                     "name": "himalaya",
+                    "argv_normalization": {
+                        "patterns": [
+                            {
+                                "id": "account",
+                                "kind": "key_value",
+                                "key_pattern": "^account$",
+                                "value_pattern": "^[A-Za-z0-9_.-]+$",
+                                "canonical_position": "before_command",
+                                "allow_positions": [
+                                    "before_command",
+                                    "after_command",
+                                ],
+                                "multiple": False,
+                            }
+                        ]
+                    },
                     "rules": [
                         {
                             "id": "list_messages",
@@ -738,10 +812,31 @@ class TestClientCLI:
         assert exit_code == 0
         assert "Client: reader" in captured.out
         assert "himalaya" in captured.out
+        assert "argv_normalization:" in captured.out
         assert "list_messages: message list" in captured.out
 
     def test_execute_command(self, monkeypatch, capsys) -> None:
         class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "himalaya",
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
             async def execute(self, tool: str, argv: list[str]):
                 from clibroker.models import ExecuteResponse
 
@@ -793,3 +888,166 @@ class TestClientCLI:
         payload = json.loads(captured.out)
         assert payload["matched_rule"] == "list_messages"
         assert payload["stdout"]["argv"] == ["message", "list"]
+
+    def test_execute_command_rejects_ambiguous_global_args(
+        self, monkeypatch, capsys
+    ) -> None:
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "obsidian",
+                                "argv_normalization": {
+                                    "patterns": [
+                                        {
+                                            "id": "vault",
+                                            "kind": "key_value",
+                                            "key_pattern": "^vault$",
+                                            "value_pattern": "^[A-Za-z0-9_. -]+$",
+                                            "canonical_position": "before_command",
+                                            "allow_positions": [
+                                                "before_command",
+                                                "after_command",
+                                            ],
+                                            "multiple": False,
+                                        }
+                                    ]
+                                },
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called for ambiguous globals")
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "obsidian",
+                "--",
+                "vault=Main",
+                "search",
+                "query=thyroid",
+                "vault=Other",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "Ambiguous global arg usage" in captured.err
+
+    def test_execute_command_rejects_malformed_global_args(
+        self, monkeypatch, capsys
+    ) -> None:
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "obsidian",
+                                "argv_normalization": {
+                                    "patterns": [
+                                        {
+                                            "id": "vault",
+                                            "kind": "key_value",
+                                            "key_pattern": "^vault$",
+                                            "value_pattern": "^[A-Za-z0-9_. -]+$",
+                                            "canonical_position": "before_command",
+                                            "allow_positions": [
+                                                "before_command",
+                                                "after_command",
+                                            ],
+                                            "multiple": False,
+                                        }
+                                    ]
+                                },
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called for malformed globals")
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "obsidian",
+                "--",
+                "search",
+                "query=thyroid",
+                "vault=bad/value",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "Invalid global arg usage" in captured.err

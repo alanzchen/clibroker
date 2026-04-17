@@ -11,6 +11,8 @@ from . import __version__
 from .audit import get_audit_logger
 from .auth import AuthenticatedClient, Authenticator
 from .models import (
+    ClientArgvNormalizationSchema,
+    ClientGlobalArgPatternSchema,
     ClientConfigResponse,
     ClientPositionalSchema,
     ClientRuleSchema,
@@ -184,7 +186,33 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
             )
 
         if rules:
-            tools.append(ClientToolSchema(name=tool_name, rules=rules))
+            argv_normalization = None
+            if (
+                tool_cfg.argv_normalization is not None
+                and tool_cfg.argv_normalization.patterns
+            ):
+                argv_normalization = ClientArgvNormalizationSchema(
+                    patterns=[
+                        ClientGlobalArgPatternSchema(
+                            id=pattern.id,
+                            kind=pattern.kind,
+                            key_pattern=pattern.key_pattern,
+                            value_pattern=pattern.value_pattern,
+                            canonical_position=pattern.canonical_position,
+                            allow_positions=list(pattern.allow_positions),
+                            multiple=pattern.multiple,
+                        )
+                        for pattern in tool_cfg.argv_normalization.patterns
+                    ]
+                )
+
+            tools.append(
+                ClientToolSchema(
+                    name=tool_name,
+                    rules=rules,
+                    argv_normalization=argv_normalization,
+                )
+            )
 
     return ClientConfigResponse(
         version=__version__,

@@ -376,12 +376,34 @@ Current commands:
 - `execute <tool> -- <argv...>`: forward an execution request to the server
 - `config show`: show the selected local client backend config with secrets redacted
 
+When a tool declares `argv_normalization`, the server advertises the accepted
+reorderable global argument patterns through `/client-config`, `tools`, and
+`tools --json`. The server remains the source of truth for normalization, while
+the client can reject obviously ambiguous forms such as duplicate global args.
+
 Examples:
 
 ```bash
 .venv/bin/clibroker-client --config client.yaml tools --json
 .venv/bin/clibroker-client --config client.yaml execute himalaya -- message list --account work
 .venv/bin/clibroker-client --config client.yaml config show
+```
+
+Example tool-level global arg normalization:
+
+```yaml
+tools:
+  obsidian:
+    executable: /usr/local/bin/obsidian
+    argv_normalization:
+      patterns:
+        - id: vault
+          kind: key_value
+          key_pattern: "^vault$"
+          value_pattern: "^[A-Za-z0-9_. -]+$"
+          canonical_position: before_command
+          allow_positions: ["before_command", "after_command"]
+          multiple: false
 ```
 
 ## Policy Rules
