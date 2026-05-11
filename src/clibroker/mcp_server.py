@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .audit import get_audit_logger
 from .config import Config, Rule, ToolConfig
+from .file_sharing import FileShareError, FileShareService
 from .policy import PolicyEngine, PolicyError
 from .runner import execute as run_command
 
@@ -27,6 +28,7 @@ def create_mcp_server(
     config: Config,
     policy: PolicyEngine,
     *,
+    file_share_service: FileShareService | None = None,
     allowed_rules: set[str] | None = None,
 ) -> FastMCP:
     """Create a FastMCP server with tools derived from the clibroker config.
@@ -51,6 +53,9 @@ def create_mcp_server(
     mcp.settings.streamable_http_path = "/"
     mcp.settings.sse_path = "/"
 
+    if file_share_service is None:
+        file_share_service = FileShareService(config)
+
     for tool_name, tool_cfg in config.tools.items():
         for rule in tool_cfg.rules:
             if rule.effect != "allow":
@@ -58,6 +63,10 @@ def create_mcp_server(
             if allowed_rules is not None and rule.id not in allowed_rules:
                 continue
             _register_rule_tool(mcp, tool_name, tool_cfg, rule, policy, allowed_rules)
+
+    for tool_name in config.tools:
+        if file_share_service.get_client_shares(tool_name, allowed_rules):
+            _register_file_tools(mcp, tool_name, file_share_service, allowed_rules)
 
     return mcp
 
@@ -264,3 +273,203 @@ def _register_rule_tool(
 
     # Register with FastMCP
     mcp.tool()(handler)
+
+
+def _register_file_tools(
+    mcp: FastMCP,
+    tool_name: str,
+    file_shares: FileShareService,
+    allowed_rules: set[str] | None,
+) -> None:
+    """Register MCP tools for safe file operations on a wrapped tool."""
+
+    log = get_audit_logger()
+    shares = file_shares.get_client_shares(tool_name, allowed_rules)
+    share_names = ", ".join(share["name"] for share in shares)
+
+    def _get_share(share: str):
+        return file_shares.get_share(tool_name, share, allowed_rules)
+
+    def _success(payload: dict[str, Any]) -> str:
+        return json.dumps(payload)
+
+    def _error(exc: Exception) -> str:
+        if isinstance(exc, FileShareError):
+            return json.dumps({"ok": False, "error": str(exc)})
+        log.exception("mcp_file_unexpected_error", tool=tool_name)
+        return json.dumps({"ok": False, "error": "Internal server error"})
+
+    async def files_list(
+        share: str,
+        path: str = ".",
+        recursive: bool = False,
+    ) -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.list_dir(share_cfg, path, recursive=recursive)
+            log.info(
+                "mcp_file_list",
+                tool=tool_name,
+                share=share,
+                path=path,
+                recursive=recursive,
+            )
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    async def files_stat(share: str, path: str = ".") -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.stat_path(share_cfg, path)
+            log.info("mcp_file_stat", tool=tool_name, share=share, path=path)
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    async def files_read(
+        share: str,
+        path: str,
+        encoding: str = "auto",
+    ) -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.read_file(share_cfg, path, encoding=encoding)
+            log.info(
+                "mcp_file_read",
+                tool=tool_name,
+                share=share,
+                path=path,
+                encoding=encoding,
+            )
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    async def files_write(
+        share: str,
+        path: str,
+        content: str,
+        encoding: str = "utf-8",
+        overwrite: bool = True,
+    ) -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.write_file(
+                share_cfg,
+                path,
+                content,
+                encoding=encoding,
+                overwrite=overwrite,
+            )
+            log.info("mcp_file_write", tool=tool_name, share=share, path=path)
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    async def files_mkdir(
+        share: str,
+        path: str,
+        parents: bool = True,
+    ) -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.mkdir(share_cfg, path, parents=parents)
+            log.info("mcp_file_mkdir", tool=tool_name, share=share, path=path)
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    async def files_move(
+        share: str,
+        source_path: str,
+        destination_path: str,
+        overwrite: bool = False,
+    ) -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.move(
+                share_cfg,
+                source_path,
+                destination_path,
+                overwrite=overwrite,
+            )
+            log.info(
+                "mcp_file_move",
+                tool=tool_name,
+                share=share,
+                source_path=source_path,
+                destination_path=destination_path,
+            )
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    async def files_delete(
+        share: str,
+        path: str,
+        recursive: bool = False,
+    ) -> str:
+        try:
+            share_cfg = _get_share(share)
+            payload = file_shares.delete(share_cfg, path, recursive=recursive)
+            log.info(
+                "mcp_file_delete",
+                tool=tool_name,
+                share=share,
+                path=path,
+                recursive=recursive,
+            )
+            return _success(payload)
+        except Exception as exc:
+            return _error(exc)
+
+    handlers = [
+        (
+            "files_list",
+            files_list,
+            f"List files in a configured share for {tool_name}. Shares: {share_names}",
+        ),
+        (
+            "files_stat",
+            files_stat,
+            f"Stat a file or directory in a configured share for {tool_name}. "
+            f"Shares: {share_names}",
+        ),
+        (
+            "files_read",
+            files_read,
+            f"Read a file from a configured share for {tool_name}. Shares: {share_names}",
+        ),
+        (
+            "files_write",
+            files_write,
+            f"Write or replace a file in a read_write share for {tool_name}. "
+            f"Shares: {share_names}",
+        ),
+        (
+            "files_mkdir",
+            files_mkdir,
+            f"Create a directory in a read_write share for {tool_name}. "
+            f"Shares: {share_names}",
+        ),
+        (
+            "files_move",
+            files_move,
+            f"Move or rename a path in a read_write share for {tool_name}. "
+            f"Shares: {share_names}",
+        ),
+        (
+            "files_delete",
+            files_delete,
+            f"Delete a path from a read_write share for {tool_name}. "
+            f"Shares: {share_names}",
+        ),
+    ]
+
+    for suffix, handler, description in handlers:
+        func_name = f"{tool_name}__{suffix}"
+        handler.__name__ = func_name
+        handler.__qualname__ = func_name
+        handler.__doc__ = description
+        mcp.tool(name=func_name, description=description)(handler)

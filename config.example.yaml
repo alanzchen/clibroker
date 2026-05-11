@@ -6,6 +6,8 @@
 #   GET  /client-config        — Token-scoped config for clibroker-client
 #   POST /mcp/<slug>/          — MCP streamable HTTP transport (JSON-RPC)
 #   GET  /sse/<slug>/          — MCP SSE transport
+#   GET  /files/<tool>/<share>/<path>
+#                                — Authenticated file download/listing
 #   GET  /token-info           — Discover your slug (requires Bearer header)
 #   GET  /health               — Health check (unauthenticated)
 #
@@ -31,6 +33,11 @@
 # policy rule is exposed as a typed MCP tool with full parameter schemas
 # for LLM discoverability.  Deny rules are excluded entirely from the
 # MCP tool list.
+#
+# File sharing uses the standard Authorization: Bearer <token> header for
+# HTTP downloads/listings.  A token can access a tool's file shares when it
+# is allowed to invoke at least one allow-rule for that tool.  Download URLs
+# never contain bearer tokens.
 
 server:
   bind: "127.0.0.1:8080"
@@ -60,9 +67,18 @@ tools:
     env:
       HOME: "/srv/clibroker"
       XDG_CONFIG_HOME: "/srv/clibroker/config"
-    working_dir: null
+    working_dir: /srv/clibroker/himalaya
     timeout_s: 30.0
     max_output_bytes: 1048576
+    file_sharing:
+      # Absolute working_dir values are exposed as a read-only share named
+      # "working_dir" by default.  Set this to false to disable that default.
+      expose_working_dir: true
+      max_file_bytes: 1048576
+      shares:
+        - name: attachments
+          path: /srv/clibroker/attachments
+          access: read_write
     rules:
       - id: list_messages
         command: ["message", "list"]
