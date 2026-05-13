@@ -214,7 +214,7 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
 
 @router.get("/files/{tool}/{share}")
 @router.get("/files/{tool}/{share}/{path:path}")
-async def get_shared_file(
+def get_shared_file(
     tool: str,
     share: str,
     request: Request,

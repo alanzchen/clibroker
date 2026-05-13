@@ -6,15 +6,18 @@ import base64
 import hashlib
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 import yaml
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
+import clibroker.file_sharing as file_sharing_module
 from clibroker.app import create_app
 from clibroker.config import Config, FileShareConfig, FileSharingConfig
 from clibroker.file_sharing import (
+    FileShareError,
     FileShareForbidden,
     FileShareNotFound,
     FileShareService,
@@ -192,6 +195,17 @@ class TestFileShareOperations:
         assert read["content"] == "hello"
         assert read["encoding"] == "utf-8"
 
+    def test_listing_has_entry_cap(self, tmp_path, monkeypatch) -> None:
+        config, _ = make_file_config(tmp_path)
+        service = FileShareService(config)
+        share = service.get_share("himalaya", "docs", ["list_messages"])
+        monkeypatch.setattr(file_sharing_module, "_MAX_LIST_ENTRIES", 1)
+
+        listing = service.list_dir(share)
+
+        assert len(listing["entries"]) == 1
+        assert listing["truncated"] is True
+
     def test_binary_read_and_write_base64(self, tmp_path) -> None:
         config, paths = make_file_config(tmp_path)
         service = FileShareService(config)
@@ -232,6 +246,25 @@ class TestFileShareOperations:
         with pytest.raises(FileShareForbidden):
             service.write_file(share, "new.txt", "content")
 
+    def test_os_errors_are_sanitized(self, tmp_path, monkeypatch) -> None:
+        config, paths = make_file_config(tmp_path)
+        service = FileShareService(config)
+        share = service.get_share("himalaya", "rw", ["list_messages"])
+        leaked_path = str(paths["rw"] / "secret.txt")
+
+        def fail_write(self, data):  # noqa: ANN001, ARG001
+            raise OSError(13, "Permission denied", leaked_path)
+
+        monkeypatch.setattr(Path, "write_bytes", fail_write)
+
+        with pytest.raises(FileShareError) as exc_info:
+            service.write_file(share, "secret.txt", "content")
+
+        message = str(exc_info.value)
+        assert "secret.txt" in message
+        assert leaked_path not in message
+        assert "Permission denied" not in message
+
     def test_large_file_rejected(self, tmp_path) -> None:
         config, _ = make_file_config(tmp_path)
         service = FileShareService(config)
@@ -249,6 +282,8 @@ class TestFileShareOperations:
             service.read_file(share, "../outside.txt")
         with pytest.raises(FileShareForbidden):
             service.read_file(share, "/etc/passwd")
+        with pytest.raises(FileShareForbidden):
+            service.read_file(share, r"nested\..\outside.txt")
 
     def test_symlink_escape_rejected(self, tmp_path) -> None:
         config, paths = make_file_config(tmp_path)

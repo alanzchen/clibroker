@@ -299,7 +299,7 @@ def _register_file_tools(
         log.exception("mcp_file_unexpected_error", tool=tool_name)
         return json.dumps({"ok": False, "error": "Internal server error"})
 
-    async def files_list(
+    def files_list(
         share: str,
         path: str = ".",
         recursive: bool = False,
@@ -318,7 +318,7 @@ def _register_file_tools(
         except Exception as exc:
             return _error(exc)
 
-    async def files_stat(share: str, path: str = ".") -> str:
+    def files_stat(share: str, path: str = ".") -> str:
         try:
             share_cfg = _get_share(share)
             payload = file_shares.stat_path(share_cfg, path)
@@ -327,7 +327,7 @@ def _register_file_tools(
         except Exception as exc:
             return _error(exc)
 
-    async def files_read(
+    def files_read(
         share: str,
         path: str,
         encoding: str = "auto",
@@ -346,7 +346,7 @@ def _register_file_tools(
         except Exception as exc:
             return _error(exc)
 
-    async def files_write(
+    def files_write(
         share: str,
         path: str,
         content: str,
@@ -367,7 +367,7 @@ def _register_file_tools(
         except Exception as exc:
             return _error(exc)
 
-    async def files_mkdir(
+    def files_mkdir(
         share: str,
         path: str,
         parents: bool = True,
@@ -380,7 +380,7 @@ def _register_file_tools(
         except Exception as exc:
             return _error(exc)
 
-    async def files_move(
+    def files_move(
         share: str,
         source_path: str,
         destination_path: str,
@@ -405,7 +405,7 @@ def _register_file_tools(
         except Exception as exc:
             return _error(exc)
 
-    async def files_delete(
+    def files_delete(
         share: str,
         path: str,
         recursive: bool = False,

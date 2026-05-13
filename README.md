@@ -153,7 +153,7 @@ File sharing behavior:
 - explicit shares support `access: read` or `access: read_write`
 - a token can access a tool's file shares when it has at least one allow-rule for that tool
 - host paths are never exposed through `/client-config`, MCP tool results, or file URLs
-- file paths must stay under the share root; absolute paths, `..`, NUL bytes, and symlink escapes are rejected
+- file paths must stay under the share root; absolute paths, `..`, backslashes, NUL bytes, and symlink escapes are rejected
 
 ### Client Config
 
@@ -294,6 +294,7 @@ File sharing notes:
 
 - `GET /files/<tool>/<share>/<path>` requires the standard bearer header
 - files are returned as downloads; directories return JSON entries
+- directory listings include `truncated` and `max_entries` fields when the listing cap is reached
 - generated file URLs are relative and do not contain secrets
 - read-write shares are writable through MCP file tools, not through the HTTP API
 

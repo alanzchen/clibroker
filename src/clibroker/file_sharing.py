@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -13,6 +15,8 @@ from urllib.parse import quote
 from .config import Config
 
 ShareAccess = Literal["read", "read_write"]
+logger = logging.getLogger("clibroker.file_sharing")
+_MAX_LIST_ENTRIES = 10_000
 
 
 class FileShareError(Exception):
@@ -168,7 +172,11 @@ class FileShareService:
             raise FileShareError(f"Path '{rel_path}' is not a directory")
 
         entries = []
+        truncated = False
         for entry in self._iter_entries(resolved, recursive=recursive):
+            if len(entries) >= _MAX_LIST_ENTRIES:
+                truncated = True
+                break
             try:
                 entries.append(self._metadata(share, root, entry))
             except (FileShareError, OSError):
@@ -181,6 +189,8 @@ class FileShareService:
             "path": rel_path,
             "url": self.url_for(share.tool_name, share.name, rel_path),
             "recursive": recursive,
+            "truncated": truncated,
+            "max_entries": _MAX_LIST_ENTRIES,
             "entries": entries,
         }
 
@@ -288,7 +298,7 @@ class FileShareService:
         try:
             candidate.write_bytes(data)
         except OSError as exc:
-            raise FileShareError(f"Failed to write '{rel_path}': {exc}") from exc
+            self._raise_os_error("write", rel_path, exc)
         return {
             "ok": True,
             "tool": share.tool_name,
@@ -324,7 +334,7 @@ class FileShareService:
         try:
             candidate.mkdir(parents=parents, exist_ok=True)
         except OSError as exc:
-            raise FileShareError(f"Failed to create directory '{rel_path}': {exc}") from exc
+            self._raise_os_error("create directory", rel_path, exc)
         return {
             "ok": True,
             "tool": share.tool_name,
@@ -376,8 +386,19 @@ class FileShareService:
         try:
             source_candidate.replace(destination_candidate)
         except OSError as exc:
+            logger.warning(
+                "file_share_os_error",
+                exc_info=True,
+                extra={
+                    "action": "move",
+                    "source_path": source_rel,
+                    "destination_path": destination_rel,
+                    "errno": exc.errno,
+                },
+            )
+            suffix = f" (errno {exc.errno})" if exc.errno is not None else ""
             raise FileShareError(
-                f"Failed to move '{source_rel}' to '{destination_rel}': {exc}"
+                f"Failed to move '{source_rel}' to '{destination_rel}'{suffix}"
             ) from exc
         return {
             "ok": True,
@@ -404,7 +425,7 @@ class FileShareService:
             try:
                 candidate.unlink()
             except OSError as exc:
-                raise FileShareError(f"Failed to delete '{rel_path}': {exc}") from exc
+                self._raise_os_error("delete", rel_path, exc)
         elif resolved.is_dir():
             try:
                 if recursive:
@@ -412,9 +433,12 @@ class FileShareService:
                 else:
                     candidate.rmdir()
             except OSError as exc:
-                raise FileShareConflict(
-                    f"Failed to delete directory '{rel_path}': {exc}"
-                ) from exc
+                self._raise_os_error(
+                    "delete directory",
+                    rel_path,
+                    exc,
+                    FileShareConflict,
+                )
         else:
             raise FileShareError(f"Path '{rel_path}' is not a file or directory")
 
@@ -485,18 +509,35 @@ class FileShareService:
             current = current.parent
         return self._checked_existing_dir(current, root)
 
-    def _iter_entries(self, root: Path, *, recursive: bool) -> list[Path]:
-        entries: list[Path] = []
+    def _iter_entries(self, root: Path, *, recursive: bool) -> Iterator[Path]:
         stack = [root]
         while stack:
             current = stack.pop()
-            for child in sorted(current.iterdir(), key=lambda item: item.name):
-                entries.append(child)
-                if recursive and child.is_dir() and not child.is_symlink():
+            try:
+                children = sorted(current.iterdir(), key=lambda item: item.name)
+            except OSError:
+                logger.warning(
+                    "file_share_list_failed",
+                    exc_info=True,
+                    extra={"path": str(current)},
+                )
+                continue
+
+            for child in children:
+                yield child
+                try:
+                    descend = recursive and child.is_dir() and not child.is_symlink()
+                except OSError:
+                    logger.warning(
+                        "file_share_list_stat_failed",
+                        exc_info=True,
+                        extra={"path": str(child)},
+                    )
+                    descend = False
+                if descend:
                     stack.append(child)
             if not recursive:
                 break
-        return entries
 
     def _metadata(
         self,
@@ -542,12 +583,29 @@ class FileShareService:
                 raise FileShareError("content is not valid base64") from exc
         raise FileShareError("encoding must be one of: utf-8, base64")
 
+    def _raise_os_error(
+        self,
+        action: str,
+        rel_path: str,
+        exc: OSError,
+        error_cls: type[FileShareError] = FileShareError,
+    ) -> None:
+        logger.warning(
+            "file_share_os_error",
+            exc_info=True,
+            extra={"action": action, "path": rel_path, "errno": exc.errno},
+        )
+        suffix = f" (errno {exc.errno})" if exc.errno is not None else ""
+        raise error_cls(f"Failed to {action} '{rel_path}'{suffix}") from exc
+
 
 def _normalize_client_path(path: str) -> tuple[tuple[str, ...], str]:
     if path is None or path == "":
         path = "."
     if "\x00" in path:
         raise FileShareForbidden("Path contains a NUL byte")
+    if "\\" in path:
+        raise FileShareForbidden("Path must use '/' separators")
 
     pure = PurePosixPath(path)
     if pure.is_absolute():
