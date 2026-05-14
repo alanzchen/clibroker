@@ -5,13 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+from starlette.responses import FileResponse
 
 from . import __version__
 from .audit import get_audit_logger
 from .auth import AuthenticatedClient, Authenticator
+from .file_sharing import FileShareError, FileShareService
 from .models import (
     ClientConfigResponse,
+    ClientFileShareSchema,
     ClientPositionalSchema,
     ClientRuleSchema,
     ClientToolSchema,
@@ -151,6 +154,7 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
 
     authenticator: Authenticator = request.app.state.authenticator
     config = request.app.state.config
+    file_shares: FileShareService = request.app.state.file_share_service
     client: AuthenticatedClient = authenticator.authenticate(request)
 
     token_value = request.headers.get("Authorization", "")[7:]
@@ -183,8 +187,19 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
                 )
             )
 
-        if rules:
-            tools.append(ClientToolSchema(name=tool_name, rules=rules))
+        client_file_shares = [
+            ClientFileShareSchema.model_validate(share)
+            for share in file_shares.get_client_shares(tool_name, allowed_rule_ids)
+        ]
+
+        if rules or client_file_shares:
+            tools.append(
+                ClientToolSchema(
+                    name=tool_name,
+                    rules=rules,
+                    file_shares=client_file_shares,
+                )
+            )
 
     return ClientConfigResponse(
         version=__version__,
@@ -195,3 +210,29 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
         sse_url=f"/sse/{slug}/",
         tools=tools,
     )
+
+
+@router.get("/files/{tool}/{share}")
+@router.get("/files/{tool}/{share}/{path:path}")
+def get_shared_file(
+    tool: str,
+    share: str,
+    request: Request,
+    path: str = ".",
+):
+    """Serve an authenticated file or directory listing from a configured share."""
+
+    authenticator: Authenticator = request.app.state.authenticator
+    file_shares: FileShareService = request.app.state.file_share_service
+    client: AuthenticatedClient = authenticator.authenticate(request)
+
+    try:
+        share_cfg = file_shares.get_share(tool, share, client.allow_rules)
+        local_path, _ = file_shares.local_path_for_read(share_cfg, path)
+        if local_path.is_dir():
+            return file_shares.list_dir(share_cfg, path)
+        if not local_path.is_file():
+            raise FileShareError("Path is not a file or directory")
+        return FileResponse(local_path)
+    except FileShareError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

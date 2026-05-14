@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 from .audit import configure_logging
 from .auth import Authenticator
 from .config import Config
+from .file_sharing import FileShareService
 from .mcp_server import create_mcp_server
 from .middleware import TimeoutMiddleware
 from .policy import PolicyEngine
@@ -49,6 +50,7 @@ def create_app(config: Config) -> FastAPI:
     configure_logging()
 
     policy = PolicyEngine(config)
+    file_share_service = FileShareService(config)
 
     # --- Per-token MCP servers ---
     # Map slug -> {mcp, streamable, sse, name}
@@ -59,7 +61,12 @@ def create_app(config: Config) -> FastAPI:
         slug = _token_slug(resolved_token)
         allowed = set(token_cfg.allow_rules)
 
-        mcp_server = create_mcp_server(config, policy, allowed_rules=allowed)
+        mcp_server = create_mcp_server(
+            config,
+            policy,
+            file_share_service=file_share_service,
+            allowed_rules=allowed,
+        )
         streamable_app = mcp_server.streamable_http_app()
         sse_app = mcp_server.sse_app()
 
@@ -87,6 +94,7 @@ def create_app(config: Config) -> FastAPI:
     # Attach shared state
     app.state.config = config
     app.state.policy = policy
+    app.state.file_share_service = file_share_service
     app.state.authenticator = Authenticator(config)
     app.state.mcp_servers = mcp_servers
 

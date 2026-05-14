@@ -16,6 +16,7 @@ It is designed for cases where you want an LLM or another client to use a CLI to
 - Exposes a single REST endpoint: `POST /execute`
 - Exposes a token-scoped client discovery endpoint: `GET /client-config`
 - Exposes MCP tools derived from allowed policy rules
+- Exposes configured per-tool host directories through authenticated file sharing
 - Enforces deny-by-default policy evaluation
 - Validates flags and positional arguments before execution
 - Applies per-token RBAC
@@ -32,6 +33,7 @@ It is designed for cases where you want an LLM or another client to use a CLI to
 - RBAC: each bearer token is allowed to invoke only specific rule IDs
 - MCP isolation: each token gets its own MCP server view with only authorized tools visible
 - Secret-safe MCP URLs: MCP/SSE endpoints use `SHA-256(token)[:16]` slugs instead of raw tokens
+- File sharing: host paths stay server-side, URLs require bearer auth, and every path is contained under the configured share root
 
 ## Requirements
 
@@ -113,6 +115,7 @@ Main sections:
 - `tools.<name>.executable`: absolute path to the wrapped CLI
 - `tools.<name>.default_args`: always prepended to the command
 - `tools.<name>.env`: explicit subprocess environment variables
+- `tools.<name>.file_sharing`: host directories exposed for authenticated file access
 - `tools.<name>.rules`: allow/deny policy rules
 
 Example token config:
@@ -128,6 +131,29 @@ server:
 ```
 
 Token values may be literal strings or `env:VAR_NAME` references.
+
+Example file sharing config:
+
+```yaml
+tools:
+  himalaya:
+    working_dir: /srv/clibroker/himalaya
+    file_sharing:
+      expose_working_dir: true
+      max_file_bytes: 1048576
+      shares:
+        - name: attachments
+          path: /srv/clibroker/attachments
+          access: read_write
+```
+
+File sharing behavior:
+
+- absolute `working_dir` values are exposed as a read-only share named `working_dir` by default
+- explicit shares support `access: read` or `access: read_write`
+- a token can access a tool's file shares when it has at least one allow-rule for that tool
+- host paths are never exposed through `/client-config`, MCP tool results, or file URLs
+- file paths must stay under the share root; absolute paths, `..`, backslashes, NUL bytes, and symlink escapes are rejected
 
 ### Client Config
 
@@ -286,6 +312,31 @@ Notes:
 - policy denials and validation failures return `200` with `ok: false`
 - auth failures return `401` or `403`
 
+### File Sharing
+
+Configured shares are available under authenticated `/files` URLs:
+
+```bash
+curl http://127.0.0.1:8080/files/himalaya/attachments/report.pdf \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -o report.pdf
+```
+
+Directory requests return JSON listings:
+
+```bash
+curl http://127.0.0.1:8080/files/himalaya/attachments \
+  -H 'Authorization: Bearer YOUR_TOKEN'
+```
+
+File sharing notes:
+
+- `GET /files/<tool>/<share>/<path>` requires the standard bearer header
+- files are returned as downloads; directories return JSON entries
+- directory listings include `truncated` and `max_entries` fields when the listing cap is reached
+- generated file URLs are relative and do not contain secrets
+- read-write shares are writable through MCP file tools, not through the HTTP API
+
 ### Client Discovery
 
 The broker client fetches a token-scoped discovery document from the server.
@@ -316,6 +367,18 @@ Example response:
           "standalone_flags": ["--unread"],
           "positionals": []
         }
+      ],
+      "file_shares": [
+        {
+          "name": "working_dir",
+          "access": "read",
+          "url": "/files/himalaya/working_dir"
+        },
+        {
+          "name": "attachments",
+          "access": "read_write",
+          "url": "/files/himalaya/attachments"
+        }
       ]
     }
   ]
@@ -325,6 +388,7 @@ Example response:
 This response is token-scoped:
 
 - only allow-rules for the authenticated token are returned
+- only file shares for tools authorized by the authenticated token are returned
 - deny rules are omitted
 - raw server config and secrets are not returned
 
@@ -365,6 +429,8 @@ MCP behavior:
 - each token only sees the tools for its allowed rule IDs
 - deny rules do not appear in MCP `tools/list`
 - MCP tool calls still pass through the policy engine before execution
+- file shares appear as `<tool>__files_*` MCP tools for authorized tools
+- read-write shares support MCP create, write, move, and delete operations
 
 ## Client CLI
 
@@ -458,7 +524,7 @@ Run all tests:
 .venv/bin/python -m pytest tests -v
 ```
 
-The current suite covers REST, MCP, policy evaluation, subprocess hardening, and security fixes.
+The current suite covers REST, MCP, file sharing, policy evaluation, subprocess hardening, and security fixes.
 
 ## Project Layout
 
@@ -468,6 +534,7 @@ src/clibroker/
   auth.py        Bearer auth and RBAC
   client/        Client package and CLI
   config.py      YAML/Pydantic config models
+  file_sharing.py Safe per-tool host directory sharing
   mcp_server.py  MCP server and tool registration
   middleware.py  Request timeout middleware
   models.py      REST request/response models
@@ -483,3 +550,4 @@ src/clibroker/
 - no graceful child-process shutdown on app stop yet
 - regex patterns come directly from config, so pattern quality matters
 - the client currently supports only the direct HTTP backend
+- the client CLI does not have dedicated file commands; use MCP file tools or authenticated `/files/...` URLs

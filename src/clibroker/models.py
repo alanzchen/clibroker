@@ -51,11 +51,20 @@ class ClientRuleSchema(BaseModel):
     positionals: list[ClientPositionalSchema] = Field(default_factory=list)
 
 
+class ClientFileShareSchema(BaseModel):
+    """A token-scoped file share exposed through client discovery."""
+
+    name: str
+    access: str
+    url: str
+
+
 class ClientToolSchema(BaseModel):
     """A token-scoped tool schema for the client discovery endpoint."""
 
     name: str
     rules: list[ClientRuleSchema]
+    file_shares: list[ClientFileShareSchema] = Field(default_factory=list)
 
 
 class ClientConfigResponse(BaseModel):

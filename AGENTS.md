@@ -31,6 +31,7 @@ Core invariants:
 - `src/clibroker/runner.py`: hardened subprocess execution with timeout/output caps
 - `src/clibroker/routes.py`: REST `POST /execute`
 - `src/clibroker/mcp_server.py`: MCP tool generation from allow rules
+- `src/clibroker/file_sharing.py`: safe per-tool host directory sharing
 - `src/clibroker/app.py`: FastAPI app factory, `/health`, `/token-info`, MCP/SSE mounts
 
 ## Required Behaviors
@@ -44,6 +45,7 @@ Core invariants:
 - Keep `/client-config` token-scoped and free of raw secrets/server internals
 - Keep deny rules excluded from MCP tool registration
 - Keep MCP handler policy validation in place for defense in depth
+- Keep file sharing bearer-authenticated, token-scoped by tool allow-rules, and contained under configured share roots
 - Keep `/health` unauthenticated
 - Keep `/token-info` authenticated
 

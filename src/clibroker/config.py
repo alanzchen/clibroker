@@ -68,6 +68,50 @@ class Rule(BaseModel):
         return self
 
 
+class FileShareConfig(BaseModel):
+    """A host directory exposed through clibroker file sharing."""
+
+    name: str
+    path: str
+    access: Literal["read", "read_write"] = "read"
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_safe(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v):
+            raise ValueError(
+                "file share name must start with an alphanumeric character "
+                "and contain only letters, numbers, '.', '_', or '-'"
+            )
+        return v
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_absolute(cls, v: str) -> str:
+        if "\x00" in v:
+            raise ValueError("file share path must not contain NUL bytes")
+        if not Path(v).is_absolute():
+            raise ValueError(f"file share path must be an absolute path, got: {v}")
+        return v
+
+
+class FileSharingConfig(BaseModel):
+    """File sharing settings for a wrapped tool."""
+
+    expose_working_dir: bool = True
+    max_file_bytes: int = Field(default=1_048_576, gt=0)
+    shares: list[FileShareConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_unique_share_names(self) -> "FileSharingConfig":
+        seen: set[str] = set()
+        for share in self.shares:
+            if share.name in seen:
+                raise ValueError(f"Duplicate file share name '{share.name}'")
+            seen.add(share.name)
+        return self
+
+
 class ToolConfig(BaseModel):
     """Configuration for a single wrapped CLI tool."""
 
@@ -77,6 +121,7 @@ class ToolConfig(BaseModel):
     working_dir: str | None = None
     timeout_s: float = 30.0
     max_output_bytes: int = 1_048_576  # 1 MB
+    file_sharing: FileSharingConfig = Field(default_factory=FileSharingConfig)
     rules: list[Rule]
 
     @field_validator("executable")
