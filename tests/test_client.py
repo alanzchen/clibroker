@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import textwrap
@@ -993,6 +994,62 @@ class TestClientCLI:
         assert exit_code == 0
         assert "receipt.pdf" in captured.out
         assert "9 bytes" in captured.out
+
+    def test_files_list_suppresses_broken_pipe(self, monkeypatch) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def list_files(self, tool, share, path="."):
+                return {
+                    "ok": True,
+                    "tool": tool,
+                    "share": share,
+                    "path": path,
+                    "entries": [
+                        {
+                            "name": "receipt.pdf",
+                            "path": "receipt.pdf",
+                            "type": "file",
+                            "size": 9,
+                        }
+                    ],
+                }
+
+        def closed_pipe_print(*args, **kwargs):
+            raise BrokenPipeError
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+        monkeypatch.setattr(builtins, "print", closed_pipe_print)
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "list",
+                "himalaya",
+                "attachments",
+            ]
+        )
+
+        assert exit_code == 0
 
     def test_files_get_downloads_to_output_directory(
         self,

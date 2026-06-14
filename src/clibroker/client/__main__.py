@@ -109,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return asyncio.run(_run(args))
+    except BrokenPipeError:
+        return 0
     except ClientBackendError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
