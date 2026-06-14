@@ -394,6 +394,56 @@ class TestHttpBackend:
         assert result.matched_rule == "list_messages"
         assert result.ok is True
 
+    @pytest.mark.asyncio
+    async def test_list_and_download_shared_file(self, tmp_path) -> None:
+        share_root = tmp_path / "attachments"
+        share_root.mkdir()
+        (share_root / "receipt.pdf").write_bytes(b"%PDF-test")
+        raw = yaml.safe_load(
+            f"""
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "{READER_TOKEN}"
+                    allow_rules: ["list_messages"]
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                file_sharing:
+                  expose_working_dir: false
+                  shares:
+                    - name: attachments
+                      path: "{share_root}"
+                      access: read
+                rules:
+                  - id: list_messages
+                    command: ["message", "list"]
+                    effect: allow
+            """
+        )
+        backend = HttpBackend(
+            HTTPBackendConfig(base_url="http://test", token=READER_TOKEN),
+            transport=ASGITransport(app=create_app(Config.model_validate(raw))),
+        )
+
+        listing = await backend.list_files("himalaya", "attachments")
+        assert listing["ok"] is True
+        assert listing["entries"][0]["name"] == "receipt.pdf"
+
+        destination = tmp_path / "downloaded.pdf"
+        result = await backend.download_file(
+            "himalaya",
+            "attachments",
+            "receipt.pdf",
+            destination,
+        )
+        assert result["path"] == str(destination)
+        assert destination.read_bytes() == b"%PDF-test"
+
 
 class TestClientCLI:
     """CLI entrypoint behavior for the client package."""
