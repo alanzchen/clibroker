@@ -1050,6 +1050,101 @@ class TestClientCLI:
         payload = json.loads(captured.out)
         assert payload["path"] == str(tmp_path / "receipt.pdf")
 
+    def test_execute_download_artifacts_fetches_returned_files(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeResult:
+            ok = True
+            exit_code = 0
+            artifacts = [
+                {
+                    "tool": "himalaya",
+                    "share": "attachments",
+                    "path": "runs/abc/receipt.pdf",
+                    "name": "receipt.pdf",
+                    "size": 9,
+                    "modified": 1.0,
+                    "sha256": "0" * 64,
+                    "url": "/files/himalaya/attachments/runs/abc/receipt.pdf",
+                    "download_url": "/files/himalaya/attachments/runs/abc/receipt.pdf",
+                }
+            ]
+
+            def model_dump(self):
+                return {
+                    "ok": self.ok,
+                    "exit_code": self.exit_code,
+                    "stdout": "",
+                    "stderr": "",
+                    "duration_ms": 1.0,
+                    "matched_rule": "download_attachments",
+                    "timed_out": False,
+                    "artifacts": self.artifacts,
+                }
+
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(self_remote)
+
+            async def execute(self, tool, argv):
+                return FakeResult()
+
+            async def download_url(self, download_url, destination):
+                return {
+                    "download_url": download_url,
+                    "path": str(destination),
+                    "size": 9,
+                }
+
+        self_remote = self._make_remote("reader", ["himalaya"])
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "--download-artifacts",
+                str(tmp_path),
+                "himalaya",
+                "--",
+                "attachment",
+                "download",
+                "42",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["downloaded_artifacts"][0]["path"] == str(
+            tmp_path / "receipt.pdf"
+        )
+
     def test_execute_command_rejects_ambiguous_global_args(
         self, monkeypatch, capsys
     ) -> None:

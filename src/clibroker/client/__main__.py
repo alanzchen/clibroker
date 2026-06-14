@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         "execute",
         help="Execute a broker tool with argv forwarded to the server",
     )
+    execute_parser.add_argument(
+        "--download-artifacts",
+        metavar="DIR",
+        help="Download artifacts returned by the brokered command into DIR",
+    )
     execute_parser.add_argument("tool", help="Wrapped tool name, such as 'himalaya'")
     execute_parser.add_argument(
         "argv",
@@ -171,7 +176,15 @@ async def _run(args: argparse.Namespace) -> int:
         remote = await backend.fetch_config()
         _validate_client_argv(args.tool, forwarded_argv, remote.tools)
         result = await backend.execute(args.tool, forwarded_argv)
-        print(json.dumps(result.model_dump(), indent=2))
+        payload = result.model_dump()
+        if args.download_artifacts:
+            downloaded = await _download_execute_artifacts(
+                backend,
+                payload.get("artifacts", []),
+                Path(args.download_artifacts),
+            )
+            payload["downloaded_artifacts"] = downloaded
+        print(json.dumps(payload, indent=2))
         if result.ok:
             return 0
         return result.exit_code if result.exit_code > 0 else 1
@@ -418,6 +431,26 @@ def _resolve_output_path(output: str, remote_path: str) -> Path:
         destination.mkdir(parents=True, exist_ok=True)
         return destination / remote_name
     return destination
+
+
+async def _download_execute_artifacts(
+    backend,  # noqa: ANN001
+    artifacts: list[dict],
+    output_dir: Path,
+) -> list[dict]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = []
+    for artifact in artifacts:
+        destination = output_dir / artifact["name"]
+        result = await backend.download_url(artifact["download_url"], destination)
+        downloaded.append(
+            {
+                **artifact,
+                "local_path": result["path"],
+                "path": result["path"],
+            }
+        )
+    return downloaded
 
 
 if __name__ == "__main__":
