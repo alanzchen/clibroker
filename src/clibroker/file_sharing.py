@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import logging
 import shutil
 from collections.abc import Iterator
@@ -217,6 +218,61 @@ class FileShareService:
                 f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
             )
         return resolved, rel_path
+
+    def prepare_artifact_dir(
+        self,
+        share: ResolvedFileShare,
+        path: str,
+    ) -> tuple[Path, str]:
+        """Create and return a safe server-side artifact directory."""
+
+        root = self._resolved_root(share)
+        parts, rel_path = _normalize_client_path(path)
+        if rel_path == ".":
+            raise FileShareError("Artifact directory must not be the share root")
+
+        candidate = root.joinpath(*parts)
+        self._checked_nearest_existing_parent(candidate, root)
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.mkdir(parents=False, exist_ok=False)
+        except FileExistsError as exc:
+            raise FileShareConflict(
+                f"Artifact directory '{rel_path}' already exists"
+            ) from exc
+        except OSError as exc:
+            self._raise_os_error("create artifact directory", rel_path, exc)
+
+        resolved = self._checked_resolve(candidate, root)
+        if not resolved.is_dir():
+            raise FileShareConflict(f"Artifact path '{rel_path}' is not a directory")
+        return resolved, rel_path
+
+    def artifact_metadata(
+        self,
+        share: ResolvedFileShare,
+        path: str,
+        *,
+        recursive: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return metadata for files under an artifact directory."""
+
+        root, _candidate, resolved, _rel_path = self._existing_path(share, path)
+        if not resolved.is_dir():
+            raise FileShareError("Artifact path is not a directory")
+
+        artifacts: list[dict[str, Any]] = []
+        for entry in self._iter_entries(resolved, recursive=recursive):
+            if not entry.is_file():
+                continue
+            metadata = self._metadata(share, root, entry)
+            if metadata["size"] is None or metadata["size"] > share.max_file_bytes:
+                continue
+            metadata["sha256"] = _sha256_file(entry)
+            artifacts.append(metadata)
+
+        artifacts.sort(key=lambda item: item["path"])
+        return artifacts
 
     def read_file(
         self,
@@ -621,6 +677,14 @@ def _normalize_client_path(path: str) -> tuple[tuple[str, ...], str]:
 
     rel_path = "/".join(parts) if parts else "."
     return tuple(parts), rel_path
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

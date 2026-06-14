@@ -50,6 +50,7 @@ class PolicyResult:
     """Successful policy evaluation result."""
 
     rule_id: str
+    rule: Rule
     tool_config: ToolConfig
     full_argv: list[str]  # the complete argv vector to execute
     normalized_argv: list[str]
@@ -184,6 +185,7 @@ class PolicyEngine:
                 )
                 return PolicyResult(
                     rule_id=rule.id,
+                    rule=rule,
                     tool_config=tool_cfg,
                     full_argv=full_argv,
                     normalized_argv=leading_global_args
