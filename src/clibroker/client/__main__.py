@@ -8,6 +8,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path, PurePosixPath
 
 from . import (
     ClientBackendError,
@@ -62,6 +63,36 @@ def main(argv: list[str] | None = None) -> int:
         help="Arguments for the wrapped tool; place them after --",
     )
 
+    files_parser = subparsers.add_parser(
+        "files", help="List or download broker file shares"
+    )
+    files_subparsers = files_parser.add_subparsers(
+        dest="files_command", required=True
+    )
+    files_list_parser = files_subparsers.add_parser(
+        "list", help="List files in a share"
+    )
+    files_list_parser.add_argument("tool")
+    files_list_parser.add_argument("share")
+    files_list_parser.add_argument("path", nargs="?", default=".")
+    files_list_parser.add_argument("--json", action="store_true", default=False)
+
+    files_get_parser = files_subparsers.add_parser(
+        "get", help="Download one file from a share"
+    )
+    files_get_parser.add_argument("tool")
+    files_get_parser.add_argument("share")
+    files_get_parser.add_argument("path")
+    files_get_parser.add_argument(
+        "--output",
+        "-o",
+        default=".",
+        help=(
+            "Destination file or directory. Existing directories receive the "
+            "remote filename."
+        ),
+    )
+
     config_parser = subparsers.add_parser("config", help="Inspect client config")
     config_subparsers = config_parser.add_subparsers(
         dest="config_command", required=True
@@ -109,6 +140,27 @@ async def _run(args: argparse.Namespace) -> int:
 
         _print_aggregated_tools(config, remotes)
         return 0
+
+    if args.command == "files":
+        backend = build_backend(config, args.backend)
+        if args.files_command == "list":
+            listing = await backend.list_files(args.tool, args.share, args.path)
+            if args.json:
+                print(json.dumps(listing, indent=2))
+            else:
+                _print_file_listing(listing)
+            return 0
+        if args.files_command == "get":
+            destination = _resolve_output_path(args.output, args.path)
+            result = await backend.download_file(
+                args.tool,
+                args.share,
+                args.path,
+                destination,
+            )
+            print(json.dumps(result, indent=2))
+            return 0
+        raise ValueError(f"Unsupported files command: {args.files_command}")
 
     if args.command == "execute":
         forwarded_argv = list(args.argv)
@@ -347,6 +399,25 @@ def _render_global_pattern(pattern: ClientGlobalArgPatternSchema) -> str:
         f"{pattern.kind}:{pattern.key_pattern}=... "
         f"[allow={positions}, canonical={canonical}, {multiple}]"
     )
+
+
+def _print_file_listing(listing: dict) -> None:
+    entries = listing.get("entries", [])
+    for entry in entries:
+        size = entry.get("size")
+        size_text = "-" if size is None else f"{size} bytes"
+        print(f"{entry.get('type', 'unknown'):9} {size_text:>12} {entry['path']}")
+
+
+def _resolve_output_path(output: str, remote_path: str) -> Path:
+    destination = Path(output)
+    remote_name = PurePosixPath(remote_path).name
+    if output.endswith("/") or (destination.exists() and destination.is_dir()):
+        return destination / remote_name
+    if destination.suffix == "":
+        destination.mkdir(parents=True, exist_ok=True)
+        return destination / remote_name
+    return destination
 
 
 if __name__ == "__main__":

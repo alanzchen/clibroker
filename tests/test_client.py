@@ -939,6 +939,117 @@ class TestClientCLI:
         assert payload["matched_rule"] == "list_messages"
         assert payload["stdout"]["argv"] == ["message", "list"]
 
+    def test_files_list_prints_share_entries(self, monkeypatch, capsys) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def list_files(self, tool, share, path="."):
+                return {
+                    "ok": True,
+                    "tool": tool,
+                    "share": share,
+                    "path": path,
+                    "entries": [
+                        {
+                            "name": "receipt.pdf",
+                            "path": "receipt.pdf",
+                            "type": "file",
+                            "size": 9,
+                        }
+                    ],
+                }
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "list",
+                "himalaya",
+                "attachments",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert "receipt.pdf" in captured.out
+        assert "9 bytes" in captured.out
+
+    def test_files_get_downloads_to_output_directory(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def download_file(self, tool, share, path, destination):
+                return {
+                    "tool": tool,
+                    "share": share,
+                    "remote_path": path,
+                    "path": str(destination),
+                    "size": 9,
+                }
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "get",
+                "himalaya",
+                "attachments",
+                "receipt.pdf",
+                "--output",
+                str(tmp_path),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["path"] == str(tmp_path / "receipt.pdf")
+
     def test_execute_command_rejects_ambiguous_global_args(
         self, monkeypatch, capsys
     ) -> None:
