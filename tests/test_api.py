@@ -33,6 +33,69 @@ async def client():
         yield c
 
 
+class TestArtifactCaptureConfig:
+    """Artifact capture config validation."""
+
+    def test_rule_accepts_artifact_capture(self) -> None:
+        config = make_config(
+            extra_yaml="""
+            x-extra: {}
+            """,
+        )
+        rule = next(
+            rule
+            for rule in config.tools["himalaya"].rules
+            if rule.id == "list_messages"
+        )
+        assert rule.artifact_capture is None
+
+    def test_artifact_capture_requires_safe_path_template(self) -> None:
+        import yaml
+        from pydantic import ValidationError
+
+        from clibroker.config import Config
+
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "test-reader-token"
+                    allow_rules: ["download_attachments"]
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                file_sharing:
+                  expose_working_dir: false
+                  shares:
+                    - name: attachments
+                      path: /tmp/clibroker-artifacts
+                      access: read
+                rules:
+                  - id: download_attachments
+                    command: ["attachment", "download"]
+                    effect: allow
+                    inject_args: ["--downloads-dir", "{artifact_dir}"]
+                    artifact_capture:
+                      share: attachments
+                      path_template: "../escape/{execution_id}"
+                    positionals:
+                      - name: id
+                        pattern: "^[0-9]+$"
+            """
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            Config.model_validate(raw)
+        assert "path_template must be relative and must not contain '..'" in str(
+            exc_info.value
+        )
+
+
 class TestAuthentication:
     """Test bearer token authentication."""
 

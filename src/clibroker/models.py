@@ -20,6 +20,20 @@ class ExecuteRequest(BaseModel):
     )
 
 
+class ExecuteArtifactSchema(BaseModel):
+    """A file produced by a brokered command and available through a file share."""
+
+    tool: str
+    share: str
+    path: str
+    name: str
+    size: int
+    modified: float
+    sha256: str
+    url: str
+    download_url: str
+
+
 class ExecuteResponse(BaseModel):
     """Structured response returned after command execution."""
 
@@ -30,6 +44,7 @@ class ExecuteResponse(BaseModel):
     duration_ms: float
     matched_rule: str
     timed_out: bool = False
+    artifacts: list[ExecuteArtifactSchema] = Field(default_factory=list)
 
 
 class ClientPositionalSchema(BaseModel):

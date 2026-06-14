@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
@@ -90,6 +90,40 @@ class ArgvNormalizationConfig(BaseModel):
         return self
 
 
+class ArtifactCaptureConfig(BaseModel):
+    """Per-rule file capture settings for commands that produce artifacts."""
+
+    share: str
+    path_template: str = "runs/{execution_id}"
+    recursive: bool = False
+
+    @field_validator("share")
+    @classmethod
+    def _share_name_is_safe(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v):
+            raise ValueError(
+                "artifact capture share must start with an alphanumeric character "
+                "and contain only letters, numbers, '.', '_', or '-'"
+            )
+        return v
+
+    @field_validator("path_template")
+    @classmethod
+    def _path_template_is_safe(cls, v: str) -> str:
+        if "\x00" in v or "\\" in v:
+            raise ValueError("path_template must not contain NUL bytes or backslashes")
+        try:
+            rendered = v.format(execution_id="execution-id")
+        except (KeyError, ValueError) as exc:
+            raise ValueError("path_template may only use {execution_id}") from exc
+        path = PurePosixPath(rendered)
+        if path.is_absolute() or any(part == ".." for part in path.parts):
+            raise ValueError("path_template must be relative and must not contain '..'")
+        if "{execution_id}" not in v:
+            raise ValueError("path_template must include {execution_id}")
+        return v
+
+
 class Rule(BaseModel):
     """A single policy rule attached to a command path."""
 
@@ -99,6 +133,7 @@ class Rule(BaseModel):
     allow_any_args: bool = False
     flags: FlagConfig | None = None
     inject_args: list[str] = Field(default_factory=list)
+    artifact_capture: ArtifactCaptureConfig | None = None
     positionals: list[PositionalArg] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -107,6 +142,26 @@ class Rule(BaseModel):
             raise ValueError(
                 "allow_any_args cannot be combined with flags or positionals"
             )
+        if self.artifact_capture is not None and self.effect != "allow":
+            raise ValueError("artifact_capture is only valid on allow rules")
+        if self.artifact_capture is None:
+            templated = [
+                arg
+                for arg in self.inject_args
+                if any(
+                    token in arg
+                    for token in (
+                        "{artifact_dir}",
+                        "{artifact_rel_dir}",
+                        "{execution_id}",
+                    )
+                )
+            ]
+            if templated:
+                raise ValueError(
+                    "artifact inject arg templates require artifact_capture: "
+                    + ", ".join(templated)
+                )
         variadic_indexes = [
             index
             for index, positional in enumerate(self.positionals)
