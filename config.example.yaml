@@ -52,12 +52,14 @@ server:
           - list_messages
           - search_messages
           - read_message
+          - download_attachments
       - name: operator
         value: "env:CLIBROKER_TOKEN_OPERATOR"
         allow_rules:
           - list_messages
           - search_messages
           - read_message
+          - download_attachments
           - move_message
       - name: agentcal
         value: "env:CLIBROKER_TOKEN_AGENTCAL"
@@ -106,6 +108,22 @@ tools:
         command: ["message", "read"]
         effect: allow
         inject_args: ["--preview"]
+        flags:
+          allowed: ["--account", "--folder"]
+        positionals:
+          - name: id
+            pattern: "^[0-9]+$"
+
+      - id: download_attachments
+        command: ["attachment", "download"]
+        effect: allow
+        inject_args:
+          - "--downloads-dir"
+          - "{artifact_dir}"
+        artifact_capture:
+          share: attachments
+          path_template: "runs/{execution_id}"
+          recursive: false
         flags:
           allowed: ["--account", "--folder"]
         positionals:
