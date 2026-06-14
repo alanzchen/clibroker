@@ -215,6 +215,8 @@ def _print_remote_tools(remote) -> None:  # noqa: ANN001
             print(f"  argv_normalization: {globals_desc}")
         for rule in tool.rules:
             parts = [f"  {rule.id}: {' '.join(rule.command)}"]
+            if rule.allow_any_args:
+                parts.append("args=any")
             if rule.flags:
                 parts.append(f"flags={', '.join(rule.flags)}")
             if rule.standalone_flags:
@@ -305,8 +307,6 @@ def _find_duplicate_global_args(
         return []
 
     matches: list[str] = []
-    seen_key: str | None = None
-    seen_value: str | None = None
     for arg in argv:
         if "=" not in arg:
             continue
@@ -317,15 +317,7 @@ def _find_duplicate_global_args(
             pattern.value_pattern, value
         ):
             continue
-        if seen_key is None:
-            seen_key = key
-            seen_value = value
-            matches.append(arg)
-            continue
-        if seen_key == key:
-            matches.append(arg)
-            if seen_value != value:
-                return matches
+        matches.append(arg)
     return matches if len(matches) > 1 else []
 
 

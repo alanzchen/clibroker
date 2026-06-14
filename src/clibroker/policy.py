@@ -82,6 +82,16 @@ class _NormalizedArgv:
     matched_globals: list[_MatchedGlobalArg] = field(default_factory=list)
 
 
+@dataclass
+class _CommandPath:
+    """A command-tree path that matched a prefix of argv."""
+
+    node: _TreeNode
+    consumed: int
+    matched_command: list[str]
+    specificity: int
+
+
 class PolicyEngine:
     """Deny-by-default policy engine built from configuration.
 
@@ -124,21 +134,16 @@ class PolicyEngine:
         leading_global_args = leading.leading_global_args
         command_argv = leading.command_argv
 
-        # Walk the command tree to find matching node
-        node = tree
-        consumed = 0
-        for part in command_argv:
-            if part in node.children:
-                node = node.children[part]
-                consumed += 1
-            else:
-                break
+        # Walk the command tree to find matching literal and wildcard paths.
+        # A command segment "*" matches exactly one argv token. Literal paths
+        # are preferred over wildcard paths at the same depth.
+        match, matched_prefix_nodes = self._match_command_path(tree, command_argv)
 
-        if not node.rules:
+        if match is None:
             raise PolicyNoMatch(tool, argv)
 
         # Remaining argv after command path
-        remaining = command_argv[consumed:]
+        remaining = command_argv[match.consumed:]
         normalized_after_command = self._normalize_after_command_args(
             normalization, remaining
         )
@@ -151,10 +156,8 @@ class PolicyEngine:
         # A deny on ["message", "delete"] cascades to deeper commands
         # like ["message", "delete", "batch"] so that adding a child
         # allow rule cannot silently bypass a parent deny.
-        walk = tree
-        for depth in range(consumed):
-            walk = walk.children[command_argv[depth]]
-            for rule in walk.rules:
+        for prefix_node in matched_prefix_nodes:
+            for rule in prefix_node.rules:
                 if rule.effect == "deny":
                     raise PolicyDenied(rule.id)
 
@@ -162,7 +165,7 @@ class PolicyEngine:
         # rule with positionals succeed when a simpler sibling rule rejects the
         # argv due to positional count.
         last_validation_error: PolicyValidationError | None = None
-        for rule in node.rules:
+        for rule in match.node.rules:
             if rule.effect == "allow":
                 try:
                     validated_argv = self._validate_rule(rule, remaining)
@@ -175,7 +178,7 @@ class PolicyEngine:
                     + tool_cfg.default_args
                     + leading_global_args
                     + normalized_after_command.leading_global_args
-                    + rule.command
+                    + match.matched_command
                     + rule.inject_args
                     + validated_argv
                 )
@@ -185,7 +188,7 @@ class PolicyEngine:
                     full_argv=full_argv,
                     normalized_argv=leading_global_args
                     + normalized_after_command.leading_global_args
-                    + rule.command
+                    + match.matched_command
                     + normalized_after_command.command_argv,
                 )
 
@@ -193,6 +196,63 @@ class PolicyEngine:
             raise last_validation_error
 
         raise PolicyNoMatch(tool, argv)
+
+    def _match_command_path(
+        self,
+        tree: _TreeNode,
+        argv: list[str],
+    ) -> tuple[_CommandPath | None, list[_TreeNode]]:
+        """Return the best command-path match plus all matching prefix nodes."""
+        active = [
+            _CommandPath(
+                node=tree,
+                consumed=0,
+                matched_command=[],
+                specificity=0,
+            )
+        ]
+        rule_paths: list[_CommandPath] = []
+        matched_prefix_nodes: list[_TreeNode] = []
+
+        for part in argv:
+            next_paths: list[_CommandPath] = []
+            for path in active:
+                exact = path.node.children.get(part)
+                if exact is not None:
+                    next_paths.append(
+                        _CommandPath(
+                            node=exact,
+                            consumed=path.consumed + 1,
+                            matched_command=path.matched_command + [part],
+                            specificity=path.specificity + 1,
+                        )
+                    )
+
+                wildcard = path.node.children.get("*")
+                if wildcard is not None:
+                    next_paths.append(
+                        _CommandPath(
+                            node=wildcard,
+                            consumed=path.consumed + 1,
+                            matched_command=path.matched_command + [part],
+                            specificity=path.specificity,
+                        )
+                    )
+
+            if not next_paths:
+                break
+
+            matched_prefix_nodes.extend(path.node for path in next_paths)
+            rule_paths.extend(path for path in next_paths if path.node.rules)
+            active = next_paths
+
+        if not rule_paths:
+            return None, matched_prefix_nodes
+
+        return (
+            max(rule_paths, key=lambda path: (path.consumed, path.specificity)),
+            matched_prefix_nodes,
+        )
 
     def _split_leading_global_args(
         self,
@@ -295,7 +355,7 @@ class PolicyEngine:
             prior_key = seen_by_key.get(match.key)
             if prior_key is None:
                 seen_by_key[match.key] = match
-            elif prior_key.value != match.value:
+            elif not match.pattern.multiple and prior_key.value != match.value:
                 raise PolicyValidationError(
                     match.pattern.id,
                     f"Conflicting global args '{prior_key.arg}' and '{match.arg}' are not allowed",
@@ -322,6 +382,9 @@ class PolicyEngine:
         - Any argument starting with ``-`` that is not a recognized allowed
           flag is rejected.
         """
+        if rule.allow_any_args:
+            return remaining
+
         flags: list[str] = []
         positionals: list[str] = []
 

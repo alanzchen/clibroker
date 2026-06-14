@@ -143,6 +143,66 @@ class TestToolRegistration:
         assert schema["properties"]["query"]["items"]["type"] == "string"
         assert "query" in schema.get("required", [])
 
+    def test_flag_schema_sanitizes_python_keywords(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              calendar:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: list_events
+                    command: ["events", "list"]
+                    effect: allow
+                    flags:
+                      allowed: ["--from", "--to", "--if-version"]
+                      standalone: ["--class"]
+            """
+        )
+        config = Config.model_validate(raw)
+        policy = PolicyEngine(config)
+        mcp = create_mcp_server(config, policy)
+        tool = mcp._tool_manager._tools["calendar__list_events"]
+        schema = tool.parameters
+        assert "from_" in schema["properties"]
+        assert "to" in schema["properties"]
+        assert "if_version" in schema["properties"]
+        assert "class_" in schema["properties"]
+
+    def test_wildcard_allow_any_args_schema(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              agentcal:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: agentcal_all
+                    command: ["*"]
+                    effect: allow
+                    allow_any_args: true
+            """
+        )
+        config = Config.model_validate(raw)
+        policy = PolicyEngine(config)
+        mcp = create_mcp_server(config, policy)
+        tool = mcp._tool_manager._tools["agentcal__agentcal_all"]
+        schema = tool.parameters
+        assert "args" in schema["properties"]
+        assert schema["properties"]["args"]["type"] == "array"
+        assert schema["properties"]["args"]["items"]["type"] == "string"
+        assert "args" in schema.get("required", [])
+
 
 # ---------------------------------------------------------------------------
 # Integration tests: MCP authentication

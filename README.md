@@ -479,6 +479,7 @@ Each rule includes:
 - `id`: unique rule ID
 - `command`: command path, such as `['message', 'read']`
 - `effect`: `allow` or `deny`
+- `allow_any_args`: when `true`, bypass structured flag/positional validation and pass the remaining argv through unchanged
 - `flags.allowed`: allowed flags that require a value
 - `flags.standalone`: allowed boolean flags that take no value
 - `inject_args`: fixed server-side args always inserted for the rule
@@ -512,6 +513,22 @@ Example variadic tail rule:
       variadic: true
 ```
 
+Example wildcard pass-through rule:
+
+```yaml
+- id: agentcal_all
+  command: ["*"]
+  effect: allow
+  allow_any_args: true
+```
+
+`*` matches exactly one command token. With `allow_any_args: true`, the
+matched command token and all remaining arguments are passed through unchanged,
+so `["events", "list", "--from", "2026-07-01"]` executes as
+`events list --from 2026-07-01` without trying to predeclare every flag. This
+mode is intentionally broad and cannot be combined with `flags` or
+`positionals`.
+
 Example deny rule:
 
 ```yaml
@@ -523,6 +540,8 @@ Example deny rule:
 Important validation rules:
 
 - `command` must contain at least one element
+- `*` in `command` matches exactly one argv token
+- `allow_any_args: true` passes the unmatched tail through unchanged and cannot be combined with `flags` or `positionals`
 - unknown flags are rejected
 - `--flag=value` is supported
 - `--` marks end-of-options

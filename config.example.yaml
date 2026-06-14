@@ -59,6 +59,10 @@ server:
           - search_messages
           - read_message
           - move_message
+      - name: agentcal
+        value: "env:CLIBROKER_TOKEN_AGENTCAL"
+        allow_rules:
+          - agentcal_all
 
 tools:
   himalaya:
@@ -122,6 +126,15 @@ tools:
       - id: deny_delete
         command: ["message", "delete"]
         effect: deny
+
+  agentcal:
+    executable: /usr/local/bin/uv
+    default_args: ["run", "--project", "/srv/agentcal", "agentcal"]
+    rules:
+      - id: agentcal_all
+        command: ["*"]
+        effect: allow
+        allow_any_args: true
 
   obsidian:
     executable: /usr/local/bin/obsidian

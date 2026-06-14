@@ -1051,3 +1051,85 @@ class TestClientCLI:
 
         assert exit_code == 1
         assert "Invalid global arg usage" in captured.err
+
+    def test_execute_command_rejects_duplicate_alternate_key_spellings(
+        self, monkeypatch, capsys
+    ) -> None:
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "obsidian",
+                                "argv_normalization": {
+                                    "patterns": [
+                                        {
+                                            "id": "vault",
+                                            "kind": "key_value",
+                                            "key_pattern": "^(v|vault)$",
+                                            "value_pattern": "^[A-Za-z0-9_. -]+$",
+                                            "canonical_position": "before_command",
+                                            "allow_positions": [
+                                                "before_command",
+                                                "after_command",
+                                            ],
+                                            "multiple": False,
+                                        }
+                                    ]
+                                },
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called for duplicate globals")
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "obsidian",
+                "--",
+                "v=Main",
+                "search",
+                "query=thyroid",
+                "vault=Main",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "Ambiguous global arg usage" in captured.err

@@ -46,6 +46,7 @@ class ClientRuleSchema(BaseModel):
 
     id: str
     command: list[str]
+    allow_any_args: bool = False
     flags: list[str] = Field(default_factory=list)
     standalone_flags: list[str] = Field(default_factory=list)
     positionals: list[ClientPositionalSchema] = Field(default_factory=list)

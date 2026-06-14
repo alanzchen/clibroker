@@ -96,12 +96,17 @@ class Rule(BaseModel):
     id: str
     command: list[str] = Field(..., min_length=1)  # e.g. ["message", "move"]
     effect: Literal["allow", "deny"] = "allow"
+    allow_any_args: bool = False
     flags: FlagConfig | None = None
     inject_args: list[str] = Field(default_factory=list)
     positionals: list[PositionalArg] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _check_variadic_positionals(self) -> "Rule":
+    def _check_argument_policy(self) -> "Rule":
+        if self.allow_any_args and (self.flags is not None or self.positionals):
+            raise ValueError(
+                "allow_any_args cannot be combined with flags or positionals"
+            )
         variadic_indexes = [
             index
             for index, positional in enumerate(self.positionals)

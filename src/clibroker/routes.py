@@ -175,6 +175,7 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
                 ClientRuleSchema(
                     id=rule.id,
                     command=rule.command,
+                    allow_any_args=rule.allow_any_args,
                     flags=rule.flags.allowed if rule.flags else [],
                     standalone_flags=rule.flags.standalone if rule.flags else [],
                     positionals=[
