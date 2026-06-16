@@ -20,6 +20,20 @@ class ExecuteRequest(BaseModel):
     )
 
 
+class ExecuteArtifactSchema(BaseModel):
+    """A file produced by a brokered command and available through a file share."""
+
+    tool: str
+    share: str
+    path: str
+    name: str
+    size: int
+    modified: float
+    sha256: str
+    url: str
+    download_url: str
+
+
 class ExecuteResponse(BaseModel):
     """Structured response returned after command execution."""
 
@@ -30,6 +44,7 @@ class ExecuteResponse(BaseModel):
     duration_ms: float
     matched_rule: str
     timed_out: bool = False
+    artifacts: list[ExecuteArtifactSchema] = Field(default_factory=list)
 
 
 class ClientPositionalSchema(BaseModel):
@@ -46,6 +61,7 @@ class ClientRuleSchema(BaseModel):
 
     id: str
     command: list[str]
+    allow_any_args: bool = False
     flags: list[str] = Field(default_factory=list)
     standalone_flags: list[str] = Field(default_factory=list)
     positionals: list[ClientPositionalSchema] = Field(default_factory=list)
@@ -59,12 +75,31 @@ class ClientFileShareSchema(BaseModel):
     url: str
 
 
+class ClientGlobalArgPatternSchema(BaseModel):
+    """A reorderable global-arg pattern exposed to clients."""
+
+    id: str
+    kind: str
+    key_pattern: str
+    value_pattern: str | None = None
+    canonical_position: str
+    allow_positions: list[str] = Field(default_factory=list)
+    multiple: bool = False
+
+
+class ClientArgvNormalizationSchema(BaseModel):
+    """Tool-level argv normalization metadata exposed to clients."""
+
+    patterns: list[ClientGlobalArgPatternSchema] = Field(default_factory=list)
+
+
 class ClientToolSchema(BaseModel):
     """A token-scoped tool schema for the client discovery endpoint."""
 
     name: str
     rules: list[ClientRuleSchema]
     file_shares: list[ClientFileShareSchema] = Field(default_factory=list)
+    argv_normalization: ClientArgvNormalizationSchema | None = None
 
 
 class ClientConfigResponse(BaseModel):

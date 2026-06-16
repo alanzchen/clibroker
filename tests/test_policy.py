@@ -64,6 +64,277 @@ class TestCommandTreeMatching:
         assert result.full_argv[-1] == "42"
 
 
+class TestWildcardRules:
+    """Test wildcard command-path matching and raw argv rules."""
+
+    def test_wildcard_allow_any_args_preserves_raw_argv(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              agentcal:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: agentcal_all
+                    command: ["*"]
+                    effect: allow
+                    allow_any_args: true
+            """
+        )
+        engine = PolicyEngine(Config.model_validate(raw))
+        result = engine.evaluate(
+            "agentcal",
+            ["events", "list", "--from", "2026-07-01", "--to", "2026-07-02"],
+        )
+        assert result.rule_id == "agentcal_all"
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "events",
+            "list",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-02",
+        ]
+        assert "*" not in result.full_argv
+
+    def test_literal_match_beats_wildcard_at_same_depth(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              cli:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: wildcard
+                    command: ["message", "*"]
+                    effect: allow
+                    allow_any_args: true
+                  - id: read
+                    command: ["message", "read"]
+                    effect: allow
+                    positionals:
+                      - name: id
+                        pattern: "^[0-9]+$"
+            """
+        )
+        engine = PolicyEngine(Config.model_validate(raw))
+        result = engine.evaluate("cli", ["message", "read", "42"])
+        assert result.rule_id == "read"
+
+    def test_wildcard_deny_cascades_to_literal_child(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              cli:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: deny_message_subcommands
+                    command: ["message", "*"]
+                    effect: deny
+                  - id: read
+                    command: ["message", "read"]
+                    effect: allow
+                    positionals:
+                      - name: id
+                        pattern: "^[0-9]+$"
+            """
+        )
+        engine = PolicyEngine(Config.model_validate(raw))
+        with pytest.raises(PolicyDenied) as exc_info:
+            engine.evaluate("cli", ["message", "read", "42"])
+        assert exc_info.value.rule_id == "deny_message_subcommands"
+
+    def test_allow_any_args_rejects_structured_argument_policy(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              cli:
+                executable: "/usr/bin/echo"
+                default_args: []
+                rules:
+                  - id: invalid
+                    command: ["*"]
+                    effect: allow
+                    allow_any_args: true
+                    flags:
+                      allowed: ["--account"]
+            """
+        )
+        with pytest.raises(ValueError, match="allow_any_args"):
+            Config.model_validate(raw)
+
+
+class TestArgvNormalization:
+    """Test tool-level argv normalization for reorderable globals."""
+
+    @pytest.fixture
+    def obsidian_engine(self) -> PolicyEngine:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              obsidian:
+                executable: "/usr/bin/echo"
+                default_args: []
+                argv_normalization:
+                  patterns:
+                    - id: vault
+                      kind: key_value
+                      key_pattern: "^vault$"
+                      value_pattern: "^[A-Za-z0-9_. -]+$"
+                      canonical_position: before_command
+                      allow_positions: ["before_command", "after_command"]
+                      multiple: false
+                rules:
+                  - id: search_plain
+                    command: ["search"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^query=.+$"
+            """
+        )
+        return PolicyEngine(Config.model_validate(raw))
+
+    def test_leading_global_arg_is_preserved_before_command(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        result = obsidian_engine.evaluate(
+            "obsidian", ["vault=Main", "search", "query=thyroid"]
+        )
+        assert result.rule_id == "search_plain"
+        assert result.normalized_argv == ["vault=Main", "search", "query=thyroid"]
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "vault=Main",
+            "search",
+            "query=thyroid",
+        ]
+
+    def test_after_command_global_arg_is_normalized_before_command(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        result = obsidian_engine.evaluate(
+            "obsidian", ["search", "vault=Main", "query=thyroid"]
+        )
+        assert result.rule_id == "search_plain"
+        assert result.normalized_argv == ["vault=Main", "search", "query=thyroid"]
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "vault=Main",
+            "search",
+            "query=thyroid",
+        ]
+
+    def test_non_matching_key_value_is_not_reclassified(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyNoMatch):
+            obsidian_engine.evaluate(
+                "obsidian", ["profile=work", "search", "query=thyroid"]
+            )
+
+    def test_duplicate_global_args_are_rejected(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            obsidian_engine.evaluate(
+                "obsidian",
+                ["vault=Main", "search", "query=thyroid", "vault=Main"],
+            )
+        assert "Duplicate global arg" in str(exc_info.value)
+
+    def test_conflicting_global_args_are_rejected(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            obsidian_engine.evaluate(
+                "obsidian",
+                ["vault=Main", "search", "query=thyroid", "vault=Other"],
+            )
+        assert "Conflicting global args" in str(exc_info.value)
+
+    def test_malformed_configured_global_arg_is_rejected(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        with pytest.raises(PolicyValidationError) as exc_info:
+            obsidian_engine.evaluate(
+                "obsidian", ["search", "query=thyroid", "vault=bad/value"]
+            )
+        assert "does not match pattern" in str(exc_info.value)
+
+    def test_multiple_true_allows_distinct_values(
+        self, obsidian_engine: PolicyEngine
+    ) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens: []
+            tools:
+              obsidian:
+                executable: "/usr/bin/echo"
+                default_args: []
+                argv_normalization:
+                  patterns:
+                    - id: tag
+                      kind: key_value
+                      key_pattern: "^tag$"
+                      value_pattern: "^[A-Za-z0-9_.-]+$"
+                      canonical_position: before_command
+                      allow_positions: ["before_command", "after_command"]
+                      multiple: true
+                rules:
+                  - id: search_plain
+                    command: ["search"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^query=.+$"
+            """
+        )
+        engine = PolicyEngine(Config.model_validate(raw))
+        result = engine.evaluate(
+            "obsidian", ["tag=one", "search", "query=thyroid", "tag=two"]
+        )
+        assert result.rule_id == "search_plain"
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "tag=one",
+            "tag=two",
+            "search",
+            "query=thyroid",
+        ]
+
+
 class TestDenyPrecedence:
     """Test that deny rules take precedence and deny-by-default works."""
 

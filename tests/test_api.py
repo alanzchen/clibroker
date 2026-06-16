@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 import pytest
@@ -31,6 +32,231 @@ async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+
+class TestArtifactCaptureConfig:
+    """Artifact capture config validation."""
+
+    def test_rule_accepts_artifact_capture(self) -> None:
+        config = make_config(
+            extra_yaml="""
+            x-extra: {}
+            """,
+        )
+        rule = next(
+            rule
+            for rule in config.tools["himalaya"].rules
+            if rule.id == "list_messages"
+        )
+        assert rule.artifact_capture is None
+
+    def test_artifact_capture_requires_safe_path_template(self) -> None:
+        import yaml
+        from pydantic import ValidationError
+
+        from clibroker.config import Config
+
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "test-reader-token"
+                    allow_rules: ["download_attachments"]
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                file_sharing:
+                  expose_working_dir: false
+                  shares:
+                    - name: attachments
+                      path: /tmp/clibroker-artifacts
+                      access: read
+                rules:
+                  - id: download_attachments
+                    command: ["attachment", "download"]
+                    effect: allow
+                    inject_args: ["--downloads-dir", "{artifact_dir}"]
+                    artifact_capture:
+                      share: attachments
+                      path_template: "../escape/{execution_id}"
+                    positionals:
+                      - name: id
+                        pattern: "^[0-9]+$"
+            """
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            Config.model_validate(raw)
+        assert "path_template must be relative and must not contain '..'" in str(
+            exc_info.value
+        )
+
+
+class TestArtifactCaptureExecution:
+    """End-to-end artifact capture from a brokered command."""
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_downloadable_artifacts(self, tmp_path) -> None:
+        import textwrap
+        import yaml
+
+        from clibroker.config import Config
+
+        artifact_root = tmp_path / "attachments"
+        artifact_root.mkdir()
+        script = (
+            "import pathlib, sys; "
+            "out = pathlib.Path(sys.argv[sys.argv.index('--downloads-dir') + 1]); "
+            "out.mkdir(parents=True, exist_ok=True); "
+            "(out / 'receipt.pdf').write_bytes(b'%PDF-test')"
+        )
+        raw = yaml.safe_load(
+            textwrap.dedent(
+                f"""
+                server:
+                  bind: "127.0.0.1:9999"
+                  auth:
+                    type: bearer
+                    tokens:
+                      - name: reader
+                        value: "{READER_TOKEN}"
+                        allow_rules: ["download_attachments"]
+                tools:
+                  himalaya:
+                    executable: "{sys.executable}"
+                    default_args: ["-c", "{script}"]
+                    file_sharing:
+                      expose_working_dir: false
+                      max_file_bytes: 1048576
+                      shares:
+                        - name: attachments
+                          path: "{artifact_root}"
+                          access: read
+                    rules:
+                      - id: download_attachments
+                        command: ["attachment", "download"]
+                        effect: allow
+                        inject_args: ["--downloads-dir", "{{artifact_dir}}"]
+                        artifact_capture:
+                          share: attachments
+                          path_template: "runs/{{execution_id}}"
+                        positionals:
+                          - name: id
+                            pattern: "^[0-9]+$"
+                """
+            )
+        )
+        app = create_app(Config.model_validate(raw))
+        observed_metadata_thread: dict[str, bool] = {}
+        artifact_metadata = app.state.file_share_service.artifact_metadata
+
+        def observing_artifact_metadata(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                observed_metadata_thread["inside_event_loop"] = False
+            else:
+                observed_metadata_thread["inside_event_loop"] = True
+            return artifact_metadata(*args, **kwargs)
+
+        app.state.file_share_service.artifact_metadata = observing_artifact_metadata
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            execute_resp = await client.post(
+                "/execute",
+                json={"tool": "himalaya", "argv": ["attachment", "download", "42"]},
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+
+            assert execute_resp.status_code == 200
+            body = execute_resp.json()
+            assert body["ok"] is True
+            assert observed_metadata_thread["inside_event_loop"] is False
+            assert len(body["artifacts"]) == 1
+            artifact = body["artifacts"][0]
+            assert artifact["tool"] == "himalaya"
+            assert artifact["share"] == "attachments"
+            assert artifact["path"].startswith("runs/")
+            assert artifact["path"].endswith("/receipt.pdf")
+            assert artifact["name"] == "receipt.pdf"
+            assert artifact["size"] == 9
+            assert len(artifact["sha256"]) == 64
+
+            file_resp = await client.get(
+                artifact["download_url"],
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+            assert file_resp.status_code == 200
+            assert file_resp.content == b"%PDF-test"
+
+    @pytest.mark.asyncio
+    async def test_artifact_prep_failure_returns_execute_response(
+        self, tmp_path
+    ) -> None:
+        import textwrap
+        import yaml
+
+        from clibroker.config import Config
+
+        artifact_root = tmp_path / "attachments"
+        artifact_root.mkdir()
+        (artifact_root / "blocked").write_text("not a directory")
+        raw = yaml.safe_load(
+            textwrap.dedent(
+                f"""
+                server:
+                  bind: "127.0.0.1:9999"
+                  auth:
+                    type: bearer
+                    tokens:
+                      - name: reader
+                        value: "{READER_TOKEN}"
+                        allow_rules: ["download_attachments"]
+                tools:
+                  himalaya:
+                    executable: "{sys.executable}"
+                    default_args: ["-c", "print('should not run')"]
+                    file_sharing:
+                      expose_working_dir: false
+                      max_file_bytes: 1048576
+                      shares:
+                        - name: attachments
+                          path: "{artifact_root}"
+                          access: read
+                    rules:
+                      - id: download_attachments
+                        command: ["attachment", "download"]
+                        effect: allow
+                        inject_args: ["--downloads-dir", "{{artifact_dir}}"]
+                        artifact_capture:
+                          share: attachments
+                          path_template: "blocked/{{execution_id}}"
+                        positionals:
+                          - name: id
+                            pattern: "^[0-9]+$"
+                """
+            )
+        )
+        app = create_app(Config.model_validate(raw))
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            execute_resp = await client.post(
+                "/execute",
+                json={"tool": "himalaya", "argv": ["attachment", "download", "42"]},
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+
+        assert execute_resp.status_code == 200
+        body = execute_resp.json()
+        assert body["ok"] is False
+        assert body["exit_code"] == -1
+        assert body["matched_rule"] == "download_attachments"
+        assert "Failed to prepare artifact directory" in body["stderr"]
 
 
 class TestAuthentication:

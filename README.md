@@ -155,6 +155,38 @@ File sharing behavior:
 - host paths are never exposed through `/client-config`, MCP tool results, or file URLs
 - file paths must stay under the share root; absolute paths, `..`, backslashes, NUL bytes, and symlink escapes are rejected
 
+Rules that create files can declare `artifact_capture`. The broker creates a
+per-execution directory inside the configured share, expands `{artifact_dir}` in
+server-injected args, and returns produced files in the `artifacts` field.
+
+```yaml
+tools:
+  himalaya:
+    file_sharing:
+      expose_working_dir: false
+      max_file_bytes: 52428800
+      shares:
+        - name: attachments
+          path: /srv/clibroker/himalaya-attachments
+          access: read
+    rules:
+      - id: download_attachments
+        command: ["attachment", "download"]
+        effect: allow
+        inject_args:
+          - "--downloads-dir"
+          - "{artifact_dir}"
+        artifact_capture:
+          share: attachments
+          path_template: "runs/{execution_id}"
+          recursive: false
+        flags:
+          allowed: ["--account", "--folder"]
+        positionals:
+          - name: id
+            pattern: "^[0-9]+$"
+```
+
 ### Client Config
 
 Start from `client.example.yaml`:
@@ -244,6 +276,19 @@ Forward an execute request to the server:
 .venv/bin/clibroker-client --config client.yaml execute himalaya -- message read 42
 ```
 
+Download command artifacts returned by an execution:
+
+```bash
+.venv/bin/clibroker-client --config client.yaml execute --download-artifacts ./downloads himalaya -- attachment download 42
+```
+
+Browse and download exposed shares directly:
+
+```bash
+.venv/bin/clibroker-client --config client.yaml files list himalaya attachments
+.venv/bin/clibroker-client --config client.yaml files get himalaya attachments runs/<execution-id>/receipt.pdf --output ./downloads/
+```
+
 Show the selected local backend config with secrets redacted:
 
 ```bash
@@ -301,7 +346,8 @@ Response shape:
   "stderr": "",
   "duration_ms": 12.34,
   "matched_rule": "move_message",
-  "timed_out": false
+  "timed_out": false,
+  "artifacts": []
 }
 ```
 
@@ -440,7 +486,32 @@ Current commands:
 
 - `tools`: fetch and print the token-scoped discovery document
 - `execute <tool> -- <argv...>`: forward an execution request to the server
+- `execute --download-artifacts <dir> <tool> -- <argv...>`: execute and download returned artifacts
+- `files list <tool> <share> [path]`: list files in an exposed share
+- `files get <tool> <share> <path> --output <file-or-dir>`: download one file from a share
 - `config show`: show the selected local client backend config with secrets redacted
+
+### Downloading Command Artifacts
+
+Rules that create files can declare `artifact_capture`. The broker creates a
+per-execution directory inside the configured share, expands `{artifact_dir}` in
+injected arguments, and returns produced files in the `artifacts` field.
+
+```bash
+clibroker-client execute --download-artifacts ./downloads himalaya -- attachment download 42
+```
+
+You can also browse and download exposed shares directly:
+
+```bash
+clibroker-client files list himalaya attachments
+clibroker-client files get himalaya attachments runs/<execution-id>/receipt.pdf --output ./downloads/
+```
+
+When a tool declares `argv_normalization`, the server advertises the accepted
+reorderable global argument patterns through `/client-config`, `tools`, and
+`tools --json`. The server remains the source of truth for normalization, while
+the client can reject obviously ambiguous forms such as duplicate global args.
 
 Examples:
 
@@ -450,6 +521,23 @@ Examples:
 .venv/bin/clibroker-client --config client.yaml config show
 ```
 
+Example tool-level global arg normalization:
+
+```yaml
+tools:
+  obsidian:
+    executable: /usr/local/bin/obsidian
+    argv_normalization:
+      patterns:
+        - id: vault
+          kind: key_value
+          key_pattern: "^vault$"
+          value_pattern: "^[A-Za-z0-9_. -]+$"
+          canonical_position: before_command
+          allow_positions: ["before_command", "after_command"]
+          multiple: false
+```
+
 ## Policy Rules
 
 Each rule includes:
@@ -457,9 +545,11 @@ Each rule includes:
 - `id`: unique rule ID
 - `command`: command path, such as `['message', 'read']`
 - `effect`: `allow` or `deny`
+- `allow_any_args`: when `true`, bypass structured flag/positional validation and pass the remaining argv through unchanged
 - `flags.allowed`: allowed flags that require a value
 - `flags.standalone`: allowed boolean flags that take no value
 - `inject_args`: fixed server-side args always inserted for the rule
+- `artifact_capture`: optional per-rule output directory capture settings
 - `positionals`: positional argument validators
 
 Example allow rule:
@@ -490,6 +580,22 @@ Example variadic tail rule:
       variadic: true
 ```
 
+Example wildcard pass-through rule:
+
+```yaml
+- id: agentcal_all
+  command: ["*"]
+  effect: allow
+  allow_any_args: true
+```
+
+`*` matches exactly one command token. With `allow_any_args: true`, the
+matched command token and all remaining arguments are passed through unchanged,
+so `["events", "list", "--from", "2026-07-01"]` executes as
+`events list --from 2026-07-01` without trying to predeclare every flag. This
+mode is intentionally broad and cannot be combined with `flags` or
+`positionals`.
+
 Example deny rule:
 
 ```yaml
@@ -501,6 +607,8 @@ Example deny rule:
 Important validation rules:
 
 - `command` must contain at least one element
+- `*` in `command` matches exactly one argv token
+- `allow_any_args: true` passes the unmatched tail through unchanged and cannot be combined with `flags` or `positionals`
 - unknown flags are rejected
 - `--flag=value` is supported
 - `--` marks end-of-options
@@ -514,6 +622,7 @@ Important validation rules:
 Notes:
 
 - `inject_args` are server-controlled and are not exposed as client-supplied parameters in `/client-config` or MCP tool schemas
+- artifact capture templates may use `{artifact_dir}`, `{artifact_rel_dir}`, and `{execution_id}` inside `inject_args`
 - execution order is `executable + default_args + command + inject_args + validated user args`
 
 ## Testing

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import FileResponse
@@ -13,11 +15,14 @@ from .audit import get_audit_logger
 from .auth import AuthenticatedClient, Authenticator
 from .file_sharing import FileShareError, FileShareService
 from .models import (
+    ClientArgvNormalizationSchema,
+    ClientGlobalArgPatternSchema,
     ClientConfigResponse,
     ClientFileShareSchema,
     ClientPositionalSchema,
     ClientRuleSchema,
     ClientToolSchema,
+    ExecuteArtifactSchema,
     ExecuteRequest,
     ExecuteResponse,
 )
@@ -44,6 +49,16 @@ def _token_slug(value: str) -> str:
     """Return the opaque token slug used by MCP/SSE URLs."""
 
     return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
+def _expand_artifact_arg(arg: str, context: dict[str, str]) -> str:
+    """Expand server-controlled artifact placeholders without formatting user argv."""
+
+    return (
+        arg.replace("{execution_id}", context["execution_id"])
+        .replace("{artifact_dir}", context["artifact_dir"])
+        .replace("{artifact_rel_dir}", context["artifact_rel_dir"])
+    )
 
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -114,29 +129,110 @@ async def execute_command(body: ExecuteRequest, request: Request) -> ExecuteResp
     # 3. Authorize client for matched rule
     Authenticator.authorize(client, result.rule_id)
 
-    # 4. Execute
+    # 4. Prepare per-execution artifact capture when configured
+    file_shares: FileShareService = request.app.state.file_share_service
+    artifact_context: dict[str, str] = {}
+    artifact_share = None
+    artifact_rel_dir = None
+
+    if result.rule.artifact_capture is not None:
+        execution_id = uuid.uuid4().hex
+        capture = result.rule.artifact_capture
+        try:
+            artifact_share = file_shares.get_share(
+                body.tool,
+                capture.share,
+                client.allow_rules,
+            )
+            artifact_rel_dir = capture.path_template.format(
+                execution_id=execution_id
+            )
+            artifact_dir, artifact_rel_dir = file_shares.prepare_artifact_dir(
+                artifact_share,
+                artifact_rel_dir,
+            )
+            artifact_context = {
+                "execution_id": execution_id,
+                "artifact_dir": str(artifact_dir),
+                "artifact_rel_dir": artifact_rel_dir,
+            }
+        except FileShareError as exc:
+            log.warning(
+                "artifact_prep_failed",
+                client=client.name,
+                tool=body.tool,
+                matched_rule=result.rule_id,
+                detail=str(exc),
+            )
+            return ExecuteResponse(
+                ok=False,
+                exit_code=-1,
+                stdout="",
+                stderr=f"Failed to prepare artifact directory: {exc}",
+                duration_ms=0,
+                matched_rule=result.rule_id,
+            )
+
+    full_argv = [
+        _expand_artifact_arg(arg, artifact_context) if artifact_context else arg
+        for arg in result.full_argv
+    ]
+
+    # 5. Execute
     tool_cfg = result.tool_config
     run_result = await execute(
-        result.full_argv,
+        full_argv,
         env=tool_cfg.env or None,
         cwd=tool_cfg.working_dir,
         timeout_s=tool_cfg.timeout_s,
         max_output_bytes=tool_cfg.max_output_bytes,
     )
 
-    # 5. Audit log (post-execution)
+    # 6. Audit log (post-execution)
     log.info(
         "command_executed",
         client=client.name,
         tool=body.tool,
         matched_rule=result.rule_id,
-        argv=result.full_argv,
+        argv=full_argv,
         exit_code=run_result.exit_code,
         duration_ms=run_result.duration_ms,
         timed_out=run_result.timed_out,
     )
 
-    # 6. Build response
+    # 7. Build response
+    artifacts: list[ExecuteArtifactSchema] = []
+    if artifact_share is not None and artifact_rel_dir is not None:
+        try:
+            metadata_list = await asyncio.to_thread(
+                file_shares.artifact_metadata,
+                artifact_share,
+                artifact_rel_dir,
+                recursive=result.rule.artifact_capture.recursive,
+            )
+            artifacts = [
+                ExecuteArtifactSchema(
+                    tool=body.tool,
+                    share=artifact_share.name,
+                    path=item["path"],
+                    name=item["name"],
+                    size=item["size"],
+                    modified=item["modified"],
+                    sha256=item["sha256"],
+                    url=item["url"],
+                    download_url=item["download_url"],
+                )
+                for item in metadata_list
+            ]
+        except FileShareError as exc:
+            log.warning(
+                "artifact_capture_failed",
+                client=client.name,
+                tool=body.tool,
+                matched_rule=result.rule_id,
+                detail=str(exc),
+            )
+
     return ExecuteResponse(
         ok=run_result.exit_code == 0 and not run_result.timed_out,
         exit_code=run_result.exit_code,
@@ -145,6 +241,7 @@ async def execute_command(body: ExecuteRequest, request: Request) -> ExecuteResp
         duration_ms=run_result.duration_ms,
         matched_rule=result.rule_id,
         timed_out=run_result.timed_out,
+        artifacts=artifacts,
     )
 
 
@@ -173,6 +270,7 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
                 ClientRuleSchema(
                     id=rule.id,
                     command=rule.command,
+                    allow_any_args=rule.allow_any_args,
                     flags=rule.flags.allowed if rule.flags else [],
                     standalone_flags=rule.flags.standalone if rule.flags else [],
                     positionals=[
@@ -192,12 +290,33 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
             for share in file_shares.get_client_shares(tool_name, allowed_rule_ids)
         ]
 
+        argv_normalization = None
+        if (
+            tool_cfg.argv_normalization is not None
+            and tool_cfg.argv_normalization.patterns
+        ):
+            argv_normalization = ClientArgvNormalizationSchema(
+                patterns=[
+                    ClientGlobalArgPatternSchema(
+                        id=pattern.id,
+                        kind=pattern.kind,
+                        key_pattern=pattern.key_pattern,
+                        value_pattern=pattern.value_pattern,
+                        canonical_position=pattern.canonical_position,
+                        allow_positions=list(pattern.allow_positions),
+                        multiple=pattern.multiple,
+                    )
+                    for pattern in tool_cfg.argv_normalization.patterns
+                ]
+            )
+
         if rules or client_file_shares:
             tools.append(
                 ClientToolSchema(
                     name=tool_name,
                     rules=rules,
                     file_shares=client_file_shares,
+                    argv_normalization=argv_normalization,
                 )
             )
 

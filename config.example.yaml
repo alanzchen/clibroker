@@ -52,13 +52,19 @@ server:
           - list_messages
           - search_messages
           - read_message
+          - download_attachments
       - name: operator
         value: "env:CLIBROKER_TOKEN_OPERATOR"
         allow_rules:
           - list_messages
           - search_messages
           - read_message
+          - download_attachments
           - move_message
+      - name: agentcal
+        value: "env:CLIBROKER_TOKEN_AGENTCAL"
+        allow_rules:
+          - agentcal_all
 
 tools:
   himalaya:
@@ -108,6 +114,22 @@ tools:
           - name: id
             pattern: "^[0-9]+$"
 
+      - id: download_attachments
+        command: ["attachment", "download"]
+        effect: allow
+        inject_args:
+          - "--downloads-dir"
+          - "{artifact_dir}"
+        artifact_capture:
+          share: attachments
+          path_template: "runs/{execution_id}"
+          recursive: false
+        flags:
+          allowed: ["--account", "--folder"]
+        positionals:
+          - name: id
+            pattern: "^[0-9]+$"
+
       - id: move_message
         command: ["message", "move"]
         effect: allow
@@ -122,3 +144,32 @@ tools:
       - id: deny_delete
         command: ["message", "delete"]
         effect: deny
+
+  agentcal:
+    executable: /usr/local/bin/uv
+    default_args: ["run", "--project", "/srv/agentcal", "agentcal"]
+    rules:
+      - id: agentcal_all
+        command: ["*"]
+        effect: allow
+        allow_any_args: true
+
+  obsidian:
+    executable: /usr/local/bin/obsidian
+    argv_normalization:
+      patterns:
+        - id: vault
+          kind: key_value
+          key_pattern: "^vault$"
+          value_pattern: "^[A-Za-z0-9_. -]+$"
+          canonical_position: before_command
+          allow_positions: ["before_command", "after_command"]
+          multiple: false
+    rules:
+      - id: vault_info
+        command: ["vault"]
+        effect: allow
+        positionals:
+          - name: args
+            pattern: "^.+$"
+            variadic: true

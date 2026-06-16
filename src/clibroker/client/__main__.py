@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from collections import defaultdict
+from pathlib import Path, PurePosixPath
 
 from . import (
     ClientBackendError,
@@ -14,6 +16,7 @@ from . import (
     load_client_config,
     resolve_client_config_path,
 )
+from ..models import ClientGlobalArgPatternSchema, ClientToolSchema
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,11 +56,46 @@ def main(argv: list[str] | None = None) -> int:
         "execute",
         help="Execute a broker tool with argv forwarded to the server",
     )
+    execute_parser.add_argument(
+        "--download-artifacts",
+        metavar="DIR",
+        help="Download artifacts returned by the brokered command into DIR",
+    )
     execute_parser.add_argument("tool", help="Wrapped tool name, such as 'himalaya'")
     execute_parser.add_argument(
         "argv",
         nargs=argparse.REMAINDER,
         help="Arguments for the wrapped tool; place them after --",
+    )
+
+    files_parser = subparsers.add_parser(
+        "files", help="List or download broker file shares"
+    )
+    files_subparsers = files_parser.add_subparsers(
+        dest="files_command", required=True
+    )
+    files_list_parser = files_subparsers.add_parser(
+        "list", help="List files in a share"
+    )
+    files_list_parser.add_argument("tool")
+    files_list_parser.add_argument("share")
+    files_list_parser.add_argument("path", nargs="?", default=".")
+    files_list_parser.add_argument("--json", action="store_true", default=False)
+
+    files_get_parser = files_subparsers.add_parser(
+        "get", help="Download one file from a share"
+    )
+    files_get_parser.add_argument("tool")
+    files_get_parser.add_argument("share")
+    files_get_parser.add_argument("path")
+    files_get_parser.add_argument(
+        "--output",
+        "-o",
+        default=".",
+        help=(
+            "Destination file or directory. Existing directories receive the "
+            "remote filename."
+        ),
     )
 
     config_parser = subparsers.add_parser("config", help="Inspect client config")
@@ -71,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return asyncio.run(_run(args))
+    except BrokenPipeError:
+        return 0
     except ClientBackendError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -108,14 +148,45 @@ async def _run(args: argparse.Namespace) -> int:
         _print_aggregated_tools(config, remotes)
         return 0
 
+    if args.command == "files":
+        backend = build_backend(config, args.backend)
+        if args.files_command == "list":
+            listing = await backend.list_files(args.tool, args.share, args.path)
+            if args.json:
+                print(json.dumps(listing, indent=2))
+            else:
+                _print_file_listing(listing)
+            return 0
+        if args.files_command == "get":
+            destination = _resolve_output_path(args.output, args.path)
+            result = await backend.download_file(
+                args.tool,
+                args.share,
+                args.path,
+                destination,
+            )
+            print(json.dumps(result, indent=2))
+            return 0
+        raise ValueError(f"Unsupported files command: {args.files_command}")
+
     if args.command == "execute":
         forwarded_argv = list(args.argv)
         if forwarded_argv[:1] == ["--"]:
             forwarded_argv = forwarded_argv[1:]
 
         backend = await _resolve_backend_for_tool(config, args.tool, args.backend)
+        remote = await backend.fetch_config()
+        _validate_client_argv(args.tool, forwarded_argv, remote.tools)
         result = await backend.execute(args.tool, forwarded_argv)
-        print(json.dumps(result.model_dump(), indent=2))
+        payload = result.model_dump()
+        if args.download_artifacts:
+            downloaded = await _download_execute_artifacts(
+                backend,
+                payload.get("artifacts", []),
+                Path(args.download_artifacts),
+            )
+            payload["downloaded_artifacts"] = downloaded
+        print(json.dumps(payload, indent=2))
         if result.ok:
             return 0
         return result.exit_code if result.exit_code > 0 else 1
@@ -203,8 +274,16 @@ def _print_remote_tools(remote) -> None:  # noqa: ANN001
     print(f"Execute URL: {remote.execute_url}")
     for tool in remote.tools:
         print(tool.name)
+        if tool.argv_normalization and tool.argv_normalization.patterns:
+            globals_desc = ", ".join(
+                _render_global_pattern(pattern)
+                for pattern in tool.argv_normalization.patterns
+            )
+            print(f"  argv_normalization: {globals_desc}")
         for rule in tool.rules:
             parts = [f"  {rule.id}: {' '.join(rule.command)}"]
+            if rule.allow_any_args:
+                parts.append("args=any")
             if rule.flags:
                 parts.append(f"flags={', '.join(rule.flags)}")
             if rule.standalone_flags:
@@ -257,6 +336,123 @@ def _print_aggregated_tools(config, remotes) -> None:  # noqa: ANN001
     for tool in payload["tool_index"]:
         suffix = " [conflict: specify --backend]" if tool["conflict"] else ""
         print(f"- {tool['name']} ({', '.join(tool['backends'])}){suffix}")
+
+
+def _validate_client_argv(
+    tool_name: str, argv: list[str], tools: list[ClientToolSchema]
+) -> None:
+    tool = next((tool for tool in tools if tool.name == tool_name), None)
+    if tool is None or tool.argv_normalization is None:
+        return
+
+    for pattern in tool.argv_normalization.patterns:
+        malformed = _find_malformed_global_args(argv, pattern)
+        if malformed:
+            raise RuntimeError(
+                f"Invalid global arg usage for tool '{tool_name}': "
+                f"{', '.join(malformed)} does not match the advertised pattern "
+                f"{pattern.key_pattern}={pattern.value_pattern or '.+'}."
+            )
+        duplicates = _find_duplicate_global_args(argv, pattern)
+        if duplicates:
+            canonical = (
+                f"{duplicates[0]} <command> ..."
+                if pattern.canonical_position == "before_command"
+                else f"<command> ... {duplicates[0]}"
+            )
+            raise RuntimeError(
+                f"Ambiguous global arg usage for tool '{tool_name}': "
+                f"{', '.join(duplicates)}. Canonical form starts with '{canonical}'."
+            )
+
+
+def _find_duplicate_global_args(
+    argv: list[str],
+    pattern: ClientGlobalArgPatternSchema,
+) -> list[str]:
+    if pattern.multiple:
+        return []
+
+    matches: list[str] = []
+    for arg in argv:
+        if "=" not in arg:
+            continue
+        key, _, value = arg.partition("=")
+        if not re.fullmatch(pattern.key_pattern, key):
+            continue
+        if pattern.value_pattern is not None and not re.fullmatch(
+            pattern.value_pattern, value
+        ):
+            continue
+        matches.append(arg)
+    return matches if len(matches) > 1 else []
+
+
+def _find_malformed_global_args(
+    argv: list[str],
+    pattern: ClientGlobalArgPatternSchema,
+) -> list[str]:
+    malformed: list[str] = []
+    for arg in argv:
+        if "=" not in arg:
+            continue
+        key, _, value = arg.partition("=")
+        if not re.fullmatch(pattern.key_pattern, key):
+            continue
+        if pattern.value_pattern is not None and not re.fullmatch(
+            pattern.value_pattern, value
+        ):
+            malformed.append(arg)
+    return malformed
+
+
+def _render_global_pattern(pattern: ClientGlobalArgPatternSchema) -> str:
+    positions = "/".join(pattern.allow_positions)
+    canonical = pattern.canonical_position
+    multiple = "multi" if pattern.multiple else "single"
+    return (
+        f"{pattern.kind}:{pattern.key_pattern}=... "
+        f"[allow={positions}, canonical={canonical}, {multiple}]"
+    )
+
+
+def _print_file_listing(listing: dict) -> None:
+    entries = listing.get("entries", [])
+    for entry in entries:
+        size = entry.get("size")
+        size_text = "-" if size is None else f"{size} bytes"
+        print(f"{entry.get('type', 'unknown'):9} {size_text:>12} {entry['path']}")
+
+
+def _resolve_output_path(output: str, remote_path: str) -> Path:
+    destination = Path(output)
+    remote_name = PurePosixPath(remote_path).name
+    if output.endswith(("/", "\\")) or (destination.exists() and destination.is_dir()):
+        return destination / remote_name
+    return destination
+
+
+async def _download_execute_artifacts(
+    backend,  # noqa: ANN001
+    artifacts: list[dict],
+    output_dir: Path,
+) -> list[dict]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = []
+    for artifact in artifacts:
+        safe_name = PurePosixPath(str(artifact["name"]).replace("\\", "/")).name
+        if not safe_name:
+            raise RuntimeError("Artifact name must include a file name")
+        destination = output_dir / safe_name
+        result = await backend.download_url(artifact["download_url"], destination)
+        downloaded.append(
+            {
+                **artifact,
+                "local_path": result["path"],
+                "path": result["path"],
+            }
+        )
+    return downloaded
 
 
 if __name__ == "__main__":

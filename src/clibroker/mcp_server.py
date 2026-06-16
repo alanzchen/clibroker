@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import keyword
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -85,12 +87,13 @@ def _register_rule_tool(
     # Build flag-name mappings: python_param_name -> CLI flag string
     value_flag_map: dict[str, str] = {}
     standalone_flag_map: dict[str, str] = {}
+    used_param_names = {pos.name for pos in rule.positionals}
     if rule.flags:
         for flag in rule.flags.allowed:
-            param_name = flag.lstrip("-").replace("-", "_")
+            param_name = _flag_to_param_name(flag, used_param_names)
             value_flag_map[param_name] = flag
         for flag in rule.flags.standalone:
-            param_name = flag.lstrip("-").replace("-", "_")
+            param_name = _flag_to_param_name(flag, used_param_names)
             standalone_flag_map[param_name] = flag
 
     # Capture loop variables in default args to avoid late-binding issues
@@ -104,28 +107,37 @@ def _register_rule_tool(
     async def handler(**kwargs: Any) -> str:
         """Dynamically-generated tool handler."""
         # Build argv from structured kwargs
-        argv: list[str] = list(_rule.command)
+        if _rule.allow_any_args:
+            raw_args = kwargs.get("args")
+            if raw_args is None:
+                argv = []
+            elif isinstance(raw_args, list):
+                argv = [str(item) for item in raw_args]
+            else:
+                argv = [str(raw_args)]
+        else:
+            argv = list(_rule.command)
 
-        # Append value-taking flags
-        for param_name, flag_str in _value_flag_map.items():
-            val = kwargs.get(param_name)
-            if val is not None and val != "":
-                argv.extend([flag_str, str(val)])
+            # Append value-taking flags
+            for param_name, flag_str in _value_flag_map.items():
+                val = kwargs.get(param_name)
+                if val is not None and val != "":
+                    argv.extend([flag_str, str(val)])
 
-        # Append standalone flags
-        for param_name, flag_str in _standalone_flag_map.items():
-            if kwargs.get(param_name):
-                argv.append(flag_str)
+            # Append standalone flags
+            for param_name, flag_str in _standalone_flag_map.items():
+                if kwargs.get(param_name):
+                    argv.append(flag_str)
 
-        # Append positionals in declaration order
-        for pos in _rule.positionals:
-            val = kwargs.get(pos.name)
-            if pos.variadic:
+            # Append positionals in declaration order
+            for pos in _rule.positionals:
+                val = kwargs.get(pos.name)
+                if pos.variadic:
+                    if val is not None:
+                        argv.extend(str(item) for item in val)
+                    continue
                 if val is not None:
-                    argv.extend(str(item) for item in val)
-                continue
-            if val is not None:
-                argv.append(str(val))
+                    argv.append(str(val))
 
         # Policy evaluation (defense in depth — the tool's existence already
         # implies allow, but we still validate flags, positionals, patterns)
@@ -207,38 +219,47 @@ def _register_rule_tool(
     # --- Build a proper function signature for FastMCP introspection ---
     params: list[inspect.Parameter] = []
 
-    # Positionals (required)
-    for pos in rule.positionals:
-        annotation = list[str] if pos.variadic else str
+    if rule.allow_any_args:
         params.append(
             inspect.Parameter(
-                pos.name,
+                "args",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=annotation,
+                annotation=list[str],
             )
         )
+    else:
+        # Positionals (required)
+        for pos in rule.positionals:
+            annotation = list[str] if pos.variadic else str
+            params.append(
+                inspect.Parameter(
+                    pos.name,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=annotation,
+                )
+            )
 
-    # Value-taking flags (optional, default None)
-    for param_name in value_flag_map:
-        params.append(
-            inspect.Parameter(
-                param_name,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=None,
-                annotation=str | None,
+        # Value-taking flags (optional, default None)
+        for param_name in value_flag_map:
+            params.append(
+                inspect.Parameter(
+                    param_name,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=None,
+                    annotation=str | None,
+                )
             )
-        )
 
-    # Standalone flags (optional boolean)
-    for param_name in standalone_flag_map:
-        params.append(
-            inspect.Parameter(
-                param_name,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=False,
-                annotation=bool,
+        # Standalone flags (optional boolean)
+        for param_name in standalone_flag_map:
+            params.append(
+                inspect.Parameter(
+                    param_name,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=False,
+                    annotation=bool,
+                )
             )
-        )
 
     handler.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
         params, return_annotation=str
@@ -253,6 +274,9 @@ def _register_rule_tool(
     desc_lines = [f"Execute: {tool_name} {' '.join(rule.command)}"]
     if rule.inject_args:
         desc_lines.append(f"Injected args: {' '.join(rule.inject_args)}")
+    if rule.allow_any_args:
+        desc_lines.append("Parameters:")
+        desc_lines.append("  - args...: required raw argv vector")
     if rule.positionals:
         desc_lines.append("Parameters:")
         for pos in rule.positionals:
@@ -473,3 +497,22 @@ def _register_file_tools(
         handler.__qualname__ = func_name
         handler.__doc__ = description
         mcp.tool(name=func_name, description=description)(handler)
+
+
+def _flag_to_param_name(flag: str, used: set[str]) -> str:
+    """Return a valid, unique Python parameter name for a CLI flag."""
+    base = re.sub(r"\W", "_", flag.lstrip("-").replace("-", "_"))
+    if not base:
+        base = "flag"
+    if base[0].isdigit():
+        base = f"flag_{base}"
+    if keyword.iskeyword(base):
+        base = f"{base}_"
+
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate

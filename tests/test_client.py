@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import textwrap
@@ -135,6 +136,64 @@ class TestClientConfigEndpoint:
                 "variadic": True,
             }
         ]
+
+    @pytest.mark.asyncio
+    async def test_client_config_exposes_argv_normalization(self) -> None:
+        raw = yaml.safe_load(
+            """
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "test-reader-token"
+                    allow_rules: ["search_messages"]
+            tools:
+              obsidian:
+                executable: "/usr/bin/echo"
+                default_args: []
+                argv_normalization:
+                  patterns:
+                    - id: vault
+                      kind: key_value
+                      key_pattern: "^vault$"
+                      value_pattern: "^[A-Za-z0-9_. -]+$"
+                      canonical_position: before_command
+                      allow_positions: ["before_command", "after_command"]
+                      multiple: false
+                rules:
+                  - id: search_messages
+                    command: ["search"]
+                    effect: allow
+                    positionals:
+                      - name: query
+                        pattern: "^query=.+$"
+            """
+        )
+        app = create_app(Config.model_validate(raw))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/client-config",
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+
+        assert resp.status_code == 200
+        tool = resp.json()["tools"][0]
+        assert tool["argv_normalization"] == {
+            "patterns": [
+                {
+                    "id": "vault",
+                    "kind": "key_value",
+                    "key_pattern": "^vault$",
+                    "value_pattern": "^[A-Za-z0-9_. -]+$",
+                    "canonical_position": "before_command",
+                    "allow_positions": ["before_command", "after_command"],
+                    "multiple": False,
+                }
+            ]
+        }
 
 
 class TestClientLocalConfig:
@@ -335,6 +394,56 @@ class TestHttpBackend:
         result = await backend.execute("himalaya", ["message", "list"])
         assert result.matched_rule == "list_messages"
         assert result.ok is True
+
+    @pytest.mark.asyncio
+    async def test_list_and_download_shared_file(self, tmp_path) -> None:
+        share_root = tmp_path / "attachments"
+        share_root.mkdir()
+        (share_root / "receipt.pdf").write_bytes(b"%PDF-test")
+        raw = yaml.safe_load(
+            f"""
+            server:
+              bind: "127.0.0.1:9999"
+              auth:
+                type: bearer
+                tokens:
+                  - name: reader
+                    value: "{READER_TOKEN}"
+                    allow_rules: ["list_messages"]
+            tools:
+              himalaya:
+                executable: "/usr/bin/echo"
+                default_args: []
+                file_sharing:
+                  expose_working_dir: false
+                  shares:
+                    - name: attachments
+                      path: "{share_root}"
+                      access: read
+                rules:
+                  - id: list_messages
+                    command: ["message", "list"]
+                    effect: allow
+            """
+        )
+        backend = HttpBackend(
+            HTTPBackendConfig(base_url="http://test", token=READER_TOKEN),
+            transport=ASGITransport(app=create_app(Config.model_validate(raw))),
+        )
+
+        listing = await backend.list_files("himalaya", "attachments")
+        assert listing["ok"] is True
+        assert listing["entries"][0]["name"] == "receipt.pdf"
+
+        destination = tmp_path / "downloaded.pdf"
+        result = await backend.download_file(
+            "himalaya",
+            "attachments",
+            "receipt.pdf",
+            destination,
+        )
+        assert result["path"] == str(destination)
+        assert destination.read_bytes() == b"%PDF-test"
 
 
 class TestClientCLI:
@@ -693,6 +802,22 @@ class TestClientCLI:
             "tools": [
                 {
                     "name": "himalaya",
+                    "argv_normalization": {
+                        "patterns": [
+                            {
+                                "id": "account",
+                                "kind": "key_value",
+                                "key_pattern": "^account$",
+                                "value_pattern": "^[A-Za-z0-9_.-]+$",
+                                "canonical_position": "before_command",
+                                "allow_positions": [
+                                    "before_command",
+                                    "after_command",
+                                ],
+                                "multiple": False,
+                            }
+                        ]
+                    },
                     "rules": [
                         {
                             "id": "list_messages",
@@ -738,10 +863,31 @@ class TestClientCLI:
         assert exit_code == 0
         assert "Client: reader" in captured.out
         assert "himalaya" in captured.out
+        assert "argv_normalization:" in captured.out
         assert "list_messages: message list" in captured.out
 
     def test_execute_command(self, monkeypatch, capsys) -> None:
         class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "himalaya",
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
             async def execute(self, tool: str, argv: list[str]):
                 from clibroker.models import ExecuteResponse
 
@@ -793,3 +939,660 @@ class TestClientCLI:
         payload = json.loads(captured.out)
         assert payload["matched_rule"] == "list_messages"
         assert payload["stdout"]["argv"] == ["message", "list"]
+
+    def test_files_list_prints_share_entries(self, monkeypatch, capsys) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def list_files(self, tool, share, path="."):
+                return {
+                    "ok": True,
+                    "tool": tool,
+                    "share": share,
+                    "path": path,
+                    "entries": [
+                        {
+                            "name": "receipt.pdf",
+                            "path": "receipt.pdf",
+                            "type": "file",
+                            "size": 9,
+                        }
+                    ],
+                }
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "list",
+                "himalaya",
+                "attachments",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert "receipt.pdf" in captured.out
+        assert "9 bytes" in captured.out
+
+    def test_files_list_suppresses_broken_pipe(self, monkeypatch) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def list_files(self, tool, share, path="."):
+                return {
+                    "ok": True,
+                    "tool": tool,
+                    "share": share,
+                    "path": path,
+                    "entries": [
+                        {
+                            "name": "receipt.pdf",
+                            "path": "receipt.pdf",
+                            "type": "file",
+                            "size": 9,
+                        }
+                    ],
+                }
+
+        def closed_pipe_print(*args, **kwargs):
+            raise BrokenPipeError
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+        monkeypatch.setattr(builtins, "print", closed_pipe_print)
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "list",
+                "himalaya",
+                "attachments",
+            ]
+        )
+
+        assert exit_code == 0
+
+    def test_files_get_downloads_to_output_directory(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def download_file(self, tool, share, path, destination):
+                return {
+                    "tool": tool,
+                    "share": share,
+                    "remote_path": path,
+                    "path": str(destination),
+                    "size": 9,
+                }
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "get",
+                "himalaya",
+                "attachments",
+                "receipt.pdf",
+                "--output",
+                str(tmp_path),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["path"] == str(tmp_path / "receipt.pdf")
+
+    def test_files_get_suffixless_output_is_file(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeBackend:
+            async def download_file(self, tool, share, path, destination):
+                return {
+                    "tool": tool,
+                    "share": share,
+                    "remote_path": path,
+                    "path": str(destination),
+                    "size": 9,
+                }
+
+        output_path = tmp_path / "LICENSE"
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "files",
+                "get",
+                "himalaya",
+                "attachments",
+                "receipt.pdf",
+                "--output",
+                str(output_path),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["path"] == str(output_path)
+
+    def test_execute_download_artifacts_fetches_returned_files(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeResult:
+            ok = True
+            exit_code = 0
+            artifacts = [
+                {
+                    "tool": "himalaya",
+                    "share": "attachments",
+                    "path": "runs/abc/receipt.pdf",
+                    "name": "receipt.pdf",
+                    "size": 9,
+                    "modified": 1.0,
+                    "sha256": "0" * 64,
+                    "url": "/files/himalaya/attachments/runs/abc/receipt.pdf",
+                    "download_url": "/files/himalaya/attachments/runs/abc/receipt.pdf",
+                }
+            ]
+
+            def model_dump(self):
+                return {
+                    "ok": self.ok,
+                    "exit_code": self.exit_code,
+                    "stdout": "",
+                    "stderr": "",
+                    "duration_ms": 1.0,
+                    "matched_rule": "download_attachments",
+                    "timed_out": False,
+                    "artifacts": self.artifacts,
+                }
+
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(self_remote)
+
+            async def execute(self, tool, argv):
+                return FakeResult()
+
+            async def download_url(self, download_url, destination):
+                return {
+                    "download_url": download_url,
+                    "path": str(destination),
+                    "size": 9,
+                }
+
+        self_remote = self._make_remote("reader", ["himalaya"])
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "--download-artifacts",
+                str(tmp_path),
+                "himalaya",
+                "--",
+                "attachment",
+                "download",
+                "42",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["downloaded_artifacts"][0]["path"] == str(
+            tmp_path / "receipt.pdf"
+        )
+
+    def test_execute_download_artifacts_sanitizes_returned_names(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        class FakeResult:
+            ok = True
+            exit_code = 0
+            artifacts = [
+                {
+                    "tool": "himalaya",
+                    "share": "attachments",
+                    "path": "runs/abc/passwd",
+                    "name": "../../passwd",
+                    "size": 9,
+                    "modified": 1.0,
+                    "sha256": "0" * 64,
+                    "url": "/files/himalaya/attachments/runs/abc/passwd",
+                    "download_url": "/files/himalaya/attachments/runs/abc/passwd",
+                }
+            ]
+
+            def model_dump(self):
+                return {
+                    "ok": self.ok,
+                    "exit_code": self.exit_code,
+                    "stdout": "",
+                    "stderr": "",
+                    "duration_ms": 1.0,
+                    "matched_rule": "download_attachments",
+                    "timed_out": False,
+                    "artifacts": self.artifacts,
+                }
+
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(self_remote)
+
+            async def execute(self, tool, argv):
+                return FakeResult()
+
+            async def download_url(self, download_url, destination):
+                return {
+                    "download_url": download_url,
+                    "path": str(destination),
+                    "size": 9,
+                }
+
+        self_remote = self._make_remote("reader", ["himalaya"])
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "--download-artifacts",
+                str(tmp_path),
+                "himalaya",
+                "--",
+                "attachment",
+                "download",
+                "42",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        payload = json.loads(captured.out)
+        assert payload["downloaded_artifacts"][0]["path"] == str(tmp_path / "passwd")
+
+    def test_execute_command_rejects_ambiguous_global_args(
+        self, monkeypatch, capsys
+    ) -> None:
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "obsidian",
+                                "argv_normalization": {
+                                    "patterns": [
+                                        {
+                                            "id": "vault",
+                                            "kind": "key_value",
+                                            "key_pattern": "^vault$",
+                                            "value_pattern": "^[A-Za-z0-9_. -]+$",
+                                            "canonical_position": "before_command",
+                                            "allow_positions": [
+                                                "before_command",
+                                                "after_command",
+                                            ],
+                                            "multiple": False,
+                                        }
+                                    ]
+                                },
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called for ambiguous globals")
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "obsidian",
+                "--",
+                "vault=Main",
+                "search",
+                "query=thyroid",
+                "vault=Other",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "Ambiguous global arg usage" in captured.err
+
+    def test_execute_command_rejects_malformed_global_args(
+        self, monkeypatch, capsys
+    ) -> None:
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "obsidian",
+                                "argv_normalization": {
+                                    "patterns": [
+                                        {
+                                            "id": "vault",
+                                            "kind": "key_value",
+                                            "key_pattern": "^vault$",
+                                            "value_pattern": "^[A-Za-z0-9_. -]+$",
+                                            "canonical_position": "before_command",
+                                            "allow_positions": [
+                                                "before_command",
+                                                "after_command",
+                                            ],
+                                            "multiple": False,
+                                        }
+                                    ]
+                                },
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called for malformed globals")
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "obsidian",
+                "--",
+                "search",
+                "query=thyroid",
+                "vault=bad/value",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "Invalid global arg usage" in captured.err
+
+    def test_execute_command_rejects_duplicate_alternate_key_spellings(
+        self, monkeypatch, capsys
+    ) -> None:
+        class FakeBackend:
+            async def fetch_config(self):
+                from clibroker.models import ClientConfigResponse
+
+                return ClientConfigResponse.model_validate(
+                    {
+                        "version": "0.1.0",
+                        "client_name": "reader",
+                        "execute_url": "/execute",
+                        "token_info_url": "/token-info",
+                        "mcp_url": f"/mcp/{READER_SLUG}/",
+                        "sse_url": f"/sse/{READER_SLUG}/",
+                        "tools": [
+                            {
+                                "name": "obsidian",
+                                "argv_normalization": {
+                                    "patterns": [
+                                        {
+                                            "id": "vault",
+                                            "kind": "key_value",
+                                            "key_pattern": "^(v|vault)$",
+                                            "value_pattern": "^[A-Za-z0-9_. -]+$",
+                                            "canonical_position": "before_command",
+                                            "allow_positions": [
+                                                "before_command",
+                                                "after_command",
+                                            ],
+                                            "multiple": False,
+                                        }
+                                    ]
+                                },
+                                "rules": [],
+                            }
+                        ],
+                    }
+                )
+
+            async def execute(self, tool: str, argv: list[str]):  # pragma: no cover - should not execute
+                raise AssertionError("execute should not be called for duplicate globals")
+
+        config = BrokerClientConfig.model_validate(
+            {
+                "default_backend": "local",
+                "backends": {
+                    "local": {
+                        "type": "http",
+                        "base_url": "http://127.0.0.1:8080",
+                        "token": "literal-token",
+                    }
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            "clibroker.client.__main__.load_client_config", lambda path: config
+        )
+        monkeypatch.setattr(
+            "clibroker.client.__main__.build_backend",
+            lambda config, backend_name=None: FakeBackend(),
+        )
+
+        exit_code = client_main(
+            [
+                "--config",
+                "ignored.yaml",
+                "execute",
+                "obsidian",
+                "--",
+                "v=Main",
+                "search",
+                "query=thyroid",
+                "vault=Main",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "Ambiguous global arg usage" in captured.err
