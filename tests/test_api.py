@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 import pytest
@@ -151,6 +152,19 @@ class TestArtifactCaptureExecution:
             )
         )
         app = create_app(Config.model_validate(raw))
+        observed_metadata_thread: dict[str, bool] = {}
+        artifact_metadata = app.state.file_share_service.artifact_metadata
+
+        def observing_artifact_metadata(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                observed_metadata_thread["inside_event_loop"] = False
+            else:
+                observed_metadata_thread["inside_event_loop"] = True
+            return artifact_metadata(*args, **kwargs)
+
+        app.state.file_share_service.artifact_metadata = observing_artifact_metadata
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             execute_resp = await client.post(
@@ -162,6 +176,7 @@ class TestArtifactCaptureExecution:
             assert execute_resp.status_code == 200
             body = execute_resp.json()
             assert body["ok"] is True
+            assert observed_metadata_thread["inside_event_loop"] is False
             assert len(body["artifacts"]) == 1
             artifact = body["artifacts"][0]
             assert artifact["tool"] == "himalaya"
@@ -178,6 +193,70 @@ class TestArtifactCaptureExecution:
             )
             assert file_resp.status_code == 200
             assert file_resp.content == b"%PDF-test"
+
+    @pytest.mark.asyncio
+    async def test_artifact_prep_failure_returns_execute_response(
+        self, tmp_path
+    ) -> None:
+        import textwrap
+        import yaml
+
+        from clibroker.config import Config
+
+        artifact_root = tmp_path / "attachments"
+        artifact_root.mkdir()
+        (artifact_root / "blocked").write_text("not a directory")
+        raw = yaml.safe_load(
+            textwrap.dedent(
+                f"""
+                server:
+                  bind: "127.0.0.1:9999"
+                  auth:
+                    type: bearer
+                    tokens:
+                      - name: reader
+                        value: "{READER_TOKEN}"
+                        allow_rules: ["download_attachments"]
+                tools:
+                  himalaya:
+                    executable: "{sys.executable}"
+                    default_args: ["-c", "print('should not run')"]
+                    file_sharing:
+                      expose_working_dir: false
+                      max_file_bytes: 1048576
+                      shares:
+                        - name: attachments
+                          path: "{artifact_root}"
+                          access: read
+                    rules:
+                      - id: download_attachments
+                        command: ["attachment", "download"]
+                        effect: allow
+                        inject_args: ["--downloads-dir", "{{artifact_dir}}"]
+                        artifact_capture:
+                          share: attachments
+                          path_template: "blocked/{{execution_id}}"
+                        positionals:
+                          - name: id
+                            pattern: "^[0-9]+$"
+                """
+            )
+        )
+        app = create_app(Config.model_validate(raw))
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            execute_resp = await client.post(
+                "/execute",
+                json={"tool": "himalaya", "argv": ["attachment", "download", "42"]},
+                headers={"Authorization": f"Bearer {READER_TOKEN}"},
+            )
+
+        assert execute_resp.status_code == 200
+        body = execute_resp.json()
+        assert body["ok"] is False
+        assert body["exit_code"] == -1
+        assert body["matched_rule"] == "download_attachments"
+        assert "Failed to prepare artifact directory" in body["stderr"]
 
 
 class TestAuthentication:

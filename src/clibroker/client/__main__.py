@@ -427,10 +427,7 @@ def _print_file_listing(listing: dict) -> None:
 def _resolve_output_path(output: str, remote_path: str) -> Path:
     destination = Path(output)
     remote_name = PurePosixPath(remote_path).name
-    if output.endswith("/") or (destination.exists() and destination.is_dir()):
-        return destination / remote_name
-    if destination.suffix == "":
-        destination.mkdir(parents=True, exist_ok=True)
+    if output.endswith(("/", "\\")) or (destination.exists() and destination.is_dir()):
         return destination / remote_name
     return destination
 
@@ -443,7 +440,10 @@ async def _download_execute_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
     downloaded = []
     for artifact in artifacts:
-        destination = output_dir / artifact["name"]
+        safe_name = PurePosixPath(str(artifact["name"]).replace("\\", "/")).name
+        if not safe_name:
+            raise RuntimeError("Artifact name must include a file name")
+        destination = output_dir / safe_name
         result = await backend.download_url(artifact["download_url"], destination)
         downloaded.append(
             {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -137,17 +138,40 @@ async def execute_command(body: ExecuteRequest, request: Request) -> ExecuteResp
     if result.rule.artifact_capture is not None:
         execution_id = uuid.uuid4().hex
         capture = result.rule.artifact_capture
-        artifact_share = file_shares.get_share(body.tool, capture.share, client.allow_rules)
-        artifact_rel_dir = capture.path_template.format(execution_id=execution_id)
-        artifact_dir, artifact_rel_dir = file_shares.prepare_artifact_dir(
-            artifact_share,
-            artifact_rel_dir,
-        )
-        artifact_context = {
-            "execution_id": execution_id,
-            "artifact_dir": str(artifact_dir),
-            "artifact_rel_dir": artifact_rel_dir,
-        }
+        try:
+            artifact_share = file_shares.get_share(
+                body.tool,
+                capture.share,
+                client.allow_rules,
+            )
+            artifact_rel_dir = capture.path_template.format(
+                execution_id=execution_id
+            )
+            artifact_dir, artifact_rel_dir = file_shares.prepare_artifact_dir(
+                artifact_share,
+                artifact_rel_dir,
+            )
+            artifact_context = {
+                "execution_id": execution_id,
+                "artifact_dir": str(artifact_dir),
+                "artifact_rel_dir": artifact_rel_dir,
+            }
+        except FileShareError as exc:
+            log.warning(
+                "artifact_prep_failed",
+                client=client.name,
+                tool=body.tool,
+                matched_rule=result.rule_id,
+                detail=str(exc),
+            )
+            return ExecuteResponse(
+                ok=False,
+                exit_code=-1,
+                stdout="",
+                stderr=f"Failed to prepare artifact directory: {exc}",
+                duration_ms=0,
+                matched_rule=result.rule_id,
+            )
 
     full_argv = [
         _expand_artifact_arg(arg, artifact_context) if artifact_context else arg
@@ -180,6 +204,12 @@ async def execute_command(body: ExecuteRequest, request: Request) -> ExecuteResp
     artifacts: list[ExecuteArtifactSchema] = []
     if artifact_share is not None and artifact_rel_dir is not None:
         try:
+            metadata_list = await asyncio.to_thread(
+                file_shares.artifact_metadata,
+                artifact_share,
+                artifact_rel_dir,
+                recursive=result.rule.artifact_capture.recursive,
+            )
             artifacts = [
                 ExecuteArtifactSchema(
                     tool=body.tool,
@@ -192,11 +222,7 @@ async def execute_command(body: ExecuteRequest, request: Request) -> ExecuteResp
                     url=item["url"],
                     download_url=item["download_url"],
                 )
-                for item in file_shares.artifact_metadata(
-                    artifact_share,
-                    artifact_rel_dir,
-                    recursive=result.rule.artifact_capture.recursive,
-                )
+                for item in metadata_list
             ]
         except FileShareError as exc:
             log.warning(
