@@ -205,7 +205,7 @@ class FileSharingConfig(BaseModel):
     """File sharing settings for a wrapped tool."""
 
     expose_working_dir: bool = True
-    max_file_bytes: int = Field(default=1_048_576, gt=0)
+    max_file_bytes: int = Field(default=1_048_576, ge=0)
     shares: list[FileShareConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")

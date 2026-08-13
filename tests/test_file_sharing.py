@@ -273,6 +273,15 @@ class TestFileShareOperations:
         with pytest.raises(FileShareTooLarge):
             service.read_file(share, "large.txt")
 
+    def test_zero_disables_file_size_limit(self, tmp_path) -> None:
+        config, _ = make_file_config(tmp_path)
+        config.tools["himalaya"].file_sharing.max_file_bytes = 0
+        service = FileShareService(config)
+        share = service.get_share("himalaya", "docs", ["list_messages"])
+
+        result = service.read_file(share, "large.txt")
+        assert result["content"] == "x" * 20
+
     def test_path_traversal_and_absolute_paths_rejected(self, tmp_path) -> None:
         config, _ = make_file_config(tmp_path)
         service = FileShareService(config)

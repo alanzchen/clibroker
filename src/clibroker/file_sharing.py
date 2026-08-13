@@ -213,7 +213,9 @@ class FileShareService:
         """Return a safe local path for authenticated HTTP read/download."""
 
         _, _, resolved, rel_path = self._existing_path(share, path)
-        if resolved.is_file() and resolved.stat().st_size > share.max_file_bytes:
+        if resolved.is_file() and _exceeds_file_limit(
+            resolved.stat().st_size, share.max_file_bytes
+        ):
             raise FileShareTooLarge(
                 f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
             )
@@ -266,7 +268,9 @@ class FileShareService:
             if not entry.is_file():
                 continue
             metadata = self._metadata(share, root, entry)
-            if metadata["size"] is None or metadata["size"] > share.max_file_bytes:
+            if metadata["size"] is None or _exceeds_file_limit(
+                metadata["size"], share.max_file_bytes
+            ):
                 continue
             metadata["sha256"] = _sha256_file(entry)
             artifacts.append(metadata)
@@ -286,7 +290,7 @@ class FileShareService:
             raise FileShareError(f"Path '{rel_path}' is not a file")
 
         size = resolved.stat().st_size
-        if size > share.max_file_bytes:
+        if _exceeds_file_limit(size, share.max_file_bytes):
             raise FileShareTooLarge(
                 f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
             )
@@ -330,7 +334,7 @@ class FileShareService:
     ) -> dict[str, Any]:
         self._require_write(share)
         data = self._decode_content(content, encoding)
-        if len(data) > share.max_file_bytes:
+        if _exceeds_file_limit(len(data), share.max_file_bytes):
             raise FileShareTooLarge(
                 f"Write exceeds max_file_bytes ({share.max_file_bytes})"
             )
@@ -685,6 +689,11 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _exceeds_file_limit(size: int, max_file_bytes: int) -> bool:
+    """A configured zero disables the application-level byte quota."""
+    return max_file_bytes > 0 and size > max_file_bytes
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
