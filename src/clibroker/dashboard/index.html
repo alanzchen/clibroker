@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>clibroker · 我的工具与助手</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar" aria-label="主导航">
+    <a class="brand" href="./"><span class="brand-mark" aria-hidden="true">▥</span> clibroker</a>
+    <nav>
+      <a href="#main" class="nav-link"><span aria-hidden="true">⌂</span> 首页</a>
+      <a href="#tools-section" class="nav-link"><span aria-hidden="true">▤</span> 我的工具</a>
+      <a href="#assistant-section" class="nav-link"><span aria-hidden="true">✧</span> 助手接入</a>
+      <a href="#activity-section" class="nav-link"><span aria-hidden="true">◷</span> 最近活动</a>
+      <a href="#settings-section" class="nav-link"><span aria-hidden="true">⚙</span> 连接设置</a>
+    </nav>
+    <div class="sidebar-note"><span class="status-dot" id="connection-dot"></span><span id="connection-label">尚未连接</span><p>工具由你配置，助手由你选择。</p></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="topbar"><span class="eyebrow">你的工具，随时可用</span><button id="connect-button" class="button secondary">连接服务</button></header>
+    <section class="hero">
+      <div class="eyebrow">一个入口 · 多种工具</div>
+      <h1>把常用工具，交给你选择的助手</h1>
+      <p>查看助手能做什么，明确每一次操作的权限。</p>
+    </section>
+    <ol class="steps" aria-label="开始使用">
+      <li><span>1</span><div>连接服务<small>使用已有访问凭证</small></div></li>
+      <li><span>2</span><div>查看工具<small>只显示你有权使用的功能</small></div></li>
+      <li><span>3</span><div>选择操作<small>确认后再执行</small></div></li>
+    </ol>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="overview-grid">
+      <section class="panel" id="tools-section" aria-labelledby="tools-title">
+        <div class="section-heading"><div><h2 id="tools-title">我的工具</h2><p id="tools-subtitle">连接后，工具会自动显示在这里。</p></div><button id="refresh-button" class="button subtle" disabled>刷新</button></div>
+        <div id="tools" class="tool-list"><div class="empty"><span class="empty-icon" aria-hidden="true">▤</span><h3>先连接你的 clibroker</h3><p>无需逐个添加工具。连接后即可查看当前凭证允许使用的功能。</p><button class="button primary" id="empty-connect">连接服务 <span aria-hidden="true">→</span></button></div></div>
+      </section>
+      <section class="panel" id="assistant-section" aria-labelledby="assistant-title">
+        <div class="section-heading"><div><h2 id="assistant-title">助手接入</h2><p>权限来自当前连接的访问凭证。</p></div></div>
+        <div class="assistant-card"><div class="avatar" aria-hidden="true">✧</div><div><h3 id="client-name">等待连接</h3><p id="client-summary">连接后查看可用工具与操作。</p></div></div>
+        <div class="tip"><h3>换一个助手，也能继续用</h3><p>在助手中配置这个服务的 MCP 地址，并使用分配给它的凭证。</p><button id="copy-mcp" class="button secondary" disabled>复制 MCP 地址</button></div>
+        <p class="fine-print">接入地址请只交给可信助手。新增助手或修改权限需由服务管理员配置。</p>
+      </section>
+    </div>
+    <section class="panel activity-panel" id="activity-section" aria-labelledby="activity-title">
+      <div class="section-heading"><div><h2 id="activity-title">最近帮你做了什么</h2><p>仅记录当前连接在本页面发起的操作，刷新后清空。</p></div><button class="button subtle" id="clear-activity" disabled>清空记录</button></div>
+      <div id="activity"><p class="empty-line">还没有操作记录。选择一个工具，查看可用操作。</p></div>
+    </section>
+    <section class="settings" id="settings-section" aria-labelledby="settings-title"><div><h2 id="settings-title">连接设置</h2><p>凭证只保存在当前页面内存中，刷新或断开连接即清除。请通过 HTTPS 或本机地址访问。</p><p>第三方账号登录、工具权限与助手使用的凭证，均需由服务管理员配置。</p></div><button id="disconnect-button" class="button secondary" disabled>断开连接</button></section>
+    <footer>clibroker <span>让工具跟着你，让权限看得见。</span></footer>
+  </main>
+  <dialog id="connect-dialog" aria-labelledby="connect-title">
+    <form id="connect-form">
+      <div class="dialog-heading"><div><span class="eyebrow">开始使用</span><h2 id="connect-title">连接你的服务</h2></div><button type="button" class="icon-button" data-close="connect-dialog" aria-label="关闭">×</button></div>
+      <p>输入管理员提供的访问凭证。只会连接当前网站所在的 clibroker 服务。</p>
+      <label for="token">访问凭证</label><input id="token" type="password" autocomplete="off" spellcheck="false" required placeholder="粘贴你的 Bearer token">
+      <p class="fine-print">不会写入浏览器存储、地址栏或日志。切换凭证会清空本页操作记录。</p>
+      <p id="connect-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="button secondary" data-close="connect-dialog">取消</button><button type="submit" class="button primary" id="connect-submit">连接</button></div>
+    </form>
+  </dialog>
+  <dialog id="tool-dialog" aria-labelledby="tool-title">
+    <div class="dialog-heading"><div><span class="eyebrow">工具与权限</span><h2 id="tool-title"></h2></div><button class="icon-button" data-close="tool-dialog" aria-label="关闭">×</button></div>
+    <p>以下操作由服务端允许。最终能否执行，还会按参数和拒绝规则检查。</p>
+    <form id="execute-form">
+      <label for="operation">选择操作</label><select id="operation" required></select>
+      <div id="parameters"></div>
+      <details id="extra-details"><summary id="extra-summary">更多参数</summary><label id="extra-args-label" for="extra-args">额外参数（JSON 字符串数组）</label><textarea id="extra-args" rows="2" placeholder='["--account", "personal"]'></textarea><p class="fine-print">每个参数单独填写为数组元素；所有参数仍需通过服务端策略。</p></details>
+      <div class="execution-warning">这会真实执行所选操作，可能修改数据。请先确认操作和参数。</div>
+      <label class="check-row"><input id="confirm-execution" type="checkbox" required> 我已确认本次操作及参数</label>
+      <p id="execute-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="button secondary" data-close="tool-dialog">关闭</button><button id="execute-submit" class="button primary" type="submit">确认并执行</button></div>
+    </form>
+    <div id="result-section" hidden><h3 id="result-title">操作结果</h3><pre id="result" tabindex="0"></pre><details><summary>完整返回数据与文件信息</summary><pre id="result-json" tabindex="0"></pre></details></div>
+  </dialog>
+</body>
+</html>
