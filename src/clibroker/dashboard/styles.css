@@ -723,6 +723,9 @@ pre {
   .tool-card {
     flex-wrap: wrap;
   }
+  .tool-card .tool-text {
+    flex-basis: calc(100% - 58px);
+  }
   .tool-card .button {
     margin-left: 58px;
   }
