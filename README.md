@@ -663,7 +663,7 @@ src/clibroker/
 
 ## Browser Dashboard
 
-The server includes a lightweight, Simplified Chinese browser client at
+The server includes a lightweight browser client in Simplified Chinese and English at
 `http://127.0.0.1:8080/dashboard/`. It ships in the Python package and needs no
 Node.js build, external fonts, CDN, or separate frontend server. Start clibroker
 as usual, then open that URL (adjust the host and port to match your config).
@@ -695,6 +695,14 @@ per-token authorization still apply on the server.
   still require the existing bearer authentication and policy enforcement.
 - Use HTTPS for remote access, or a local loopback address. Prefer a dedicated,
   least-privilege token for browser use rather than a broadly privileged token.
+- The language selector covers interface text, validation, results labels and
+  activity times. Browser language preferences choose the initial language; an
+  unsupported language falls back to English. The explicit choice is remembered
+  as `clibroker.language` in local storage (only `en` or `zh-CN`). If storage is
+  blocked, language switching still works for the current page. Tool names,
+  argument names, rule names and service output remain in their original language.
+  Switching languages preserves the current connection, open forms and execution
+  confirmation; editing arguments still clears confirmation.
 - Credentials remain in page memory only, never in local/session storage,
   cookies, or URL query parameters. Refreshing or disconnecting clears them.
   Treat the copied MCP URL as sensitive: its opaque slug grants access under
@@ -715,3 +723,18 @@ per-token authorization still apply on the server.
 The friendly layout uses the existing discovery document without adding any
 new administrative or execution APIs. Tool names and operation names come
 from your configuration, so use clear names for a more approachable experience.
+
+### Extending and checking dashboard translations
+
+The local dictionaries and locale names are in
+`src/clibroker/dashboard/i18n.js`. Add the same keys and interpolation fields
+to each dictionary when extending the interface. No translation service or
+frontend build is required. Both page and dialog language selectors use that
+locale list. The current UI supports `en` and `zh-CN`; it does not claim
+translations for other languages.
+
+The optional Node.js development check uses the built-in test runner:
+
+```bash
+node --test tests/dashboard_i18n.test.cjs
+```

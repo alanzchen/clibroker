@@ -1,0 +1,12 @@
+✔ language negotiation follows saved preference, then browser order, then English (1.148256ms)
+✔ every supported dictionary has the same messages and interpolation fields (3.243305ms)
+✔ interpolation preserves server-owned strings and unsupported locales use English (0.630978ms)
+✔ all static HTML translation references resolve in both languages (0.763507ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 78.491227
