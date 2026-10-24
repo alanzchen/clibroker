@@ -54,6 +54,7 @@ class PolicyResult:
     tool_config: ToolConfig
     full_argv: list[str]  # the complete argv vector to execute
     normalized_argv: list[str]
+    inject_args_offset: int
 
 
 @dataclass
@@ -180,14 +181,15 @@ class PolicyEngine:
                     + leading_global_args
                     + normalized_after_command.leading_global_args
                     + match.matched_command
-                    + rule.inject_args
-                    + validated_argv
                 )
+                inject_args_offset = len(full_argv)
+                full_argv += rule.inject_args + validated_argv
                 return PolicyResult(
                     rule_id=rule.id,
                     rule=rule,
                     tool_config=tool_cfg,
                     full_argv=full_argv,
+                    inject_args_offset=inject_args_offset,
                     normalized_argv=leading_global_args
                     + normalized_after_command.leading_global_args
                     + match.matched_command

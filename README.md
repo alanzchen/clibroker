@@ -440,7 +440,10 @@ This response is token-scoped:
 
 ## MCP
 
-`clibroker` exposes both streamable HTTP MCP and SSE MCP transports.
+`clibroker` uses the official Python SDK 2.3+ (`mcp>=2.3,<3`) and supports
+MCP **2026-07-28** over Streamable HTTP. The SDK also serves earlier protocol
+revisions, including the existing initialization flow and legacy SSE transport.
+Upgrade an existing checkout with `uv pip install -e '.[dev]'`.
 
 Endpoints:
 
@@ -474,9 +477,55 @@ MCP behavior:
 
 - each token only sees the tools for its allowed rule IDs
 - deny rules do not appear in MCP `tools/list`
-- MCP tool calls still pass through the policy engine before execution
+- REST and MCP command calls use the same policy, RBAC, execution, artifact capture, and audit pipeline
 - file shares appear as `<tool>__files_*` MCP tools for authorized tools
 - read-write shares support MCP create, write, move, and delete operations
+
+### Typed execution results and artifacts
+
+Each policy-generated command tool publishes an `outputSchema`. Results contain
+`structuredContent` with `ok`, `exit_code`, `stdout`, `stderr`, `duration_ms`,
+`matched_rule`, `timed_out`, and `artifacts`. A JSON text block carries the same
+object for clients that consume text. Policy failures, authorization failures,
+nonzero exits, timeouts, and artifact capture failures set MCP `isError: true`.
+Error details are in `stderr`; this replaces the old MCP-only `error` field.
+SDK-level input validation errors may instead contain only an error text block.
+
+An `artifact_capture` rule works identically over REST and MCP. On MCP, each
+artifact also includes `uri` and `mime_type`, and appears as a native
+`resource_link` content block. For example:
+
+```text
+clibroker://artifacts/himalaya/attachments/runs/<execution-id>/receipt.pdf
+```
+
+Read that URI with `resources/read` on the same MCP endpoint. Send
+`Authorization: Bearer YOUR_TOKEN` with resource reads, even if you already know
+the endpoint slug. Both the endpoint's rule allowlist and the bearer token must
+authorize the tool's share. Resource reads return exact bytes in a base64 `blob`
+with `application/octet-stream`; resource links supply the filename's inferred
+MIME type. Nested paths and special characters are URL-encoded in the URI.
+The existing relative `download_url` remains available for authenticated HTTP
+downloads, and the REST response format is unchanged.
+
+Resources use the existing share authorization model: tokens with an allow rule
+for a tool can read that tool's shares. They are not private to the execution
+that created them. Reads recheck path containment and `max_file_bytes`, and
+reflect the current file on disk. Moving or deleting a file invalidates its old
+URI. Listing and resource results carry `cacheScope: "private"` and `ttlMs: 0`.
+
+### Current protocol requests
+
+For `2026-07-28`, clients can call `server/discover` or send a request directly;
+an initialization handshake is unnecessary. Requests carry
+`io.modelcontextprotocol/protocolVersion` and
+`io.modelcontextprotocol/clientCapabilities` in `params._meta`. HTTP requests
+also send `MCP-Protocol-Version` and `Mcp-Method`, plus `Mcp-Name` for a tool call
+or resource read. The SDK validates and handles these fields; use a current MCP
+client to construct them automatically. Unsupported versions receive a protocol
+error describing the supported versions. No session ID is required.
+
+The legacy `/sse/<slug>/` endpoint and existing slug discovery URLs are retained.
 
 ## Client CLI
 
@@ -643,6 +692,7 @@ src/clibroker/
   auth.py        Bearer auth and RBAC
   client/        Client package and CLI
   config.py      YAML/Pydantic config models
+  execution.py   Shared REST/MCP execution and artifact capture
   file_sharing.py Safe per-tool host directory sharing
   mcp_server.py  MCP server and tool registration
   middleware.py  Request timeout middleware

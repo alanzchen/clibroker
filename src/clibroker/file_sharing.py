@@ -291,7 +291,15 @@ class FileShareService:
                 f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
             )
 
-        data = resolved.read_bytes()
+        # A running command can grow an artifact after the stat check.
+        # Bound the read itself so resources/read cannot load an unbounded file.
+        with resolved.open("rb") as stream:
+            data = stream.read(share.max_file_bytes + 1)
+        if len(data) > share.max_file_bytes:
+            raise FileShareTooLarge(
+                f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
+            )
+        size = len(data)
         if encoding == "auto":
             try:
                 content = data.decode("utf-8")

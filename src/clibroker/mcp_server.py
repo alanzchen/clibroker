@@ -11,19 +11,126 @@ and the hardened subprocess runner.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import inspect
 import json
 import keyword
+import mimetypes
 import re
-from typing import Any
+from typing import Annotated, Any
+from urllib.parse import quote
 
-from mcp.server.fastmcp import FastMCP
+from fastapi import HTTPException
+from mcp.server import MCPServer
+from mcp.server.caching import CacheHint
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ResourceError
+from mcp.types import CallToolResult, ResourceLink, TextContent
 
+from . import __version__
 from .audit import get_audit_logger
-from .config import Config, Rule, ToolConfig
+from .auth import Authenticator
+from .config import Config, Rule
+from .execution import ExecutionForbidden, ExecutionService, execution_error
 from .file_sharing import FileShareError, FileShareService
-from .policy import PolicyEngine, PolicyError
-from .runner import execute as run_command
+from .models import ExecuteArtifactSchema, ExecuteResponse
+from .policy import PolicyEngine
+
+
+class MCPArtifactSchema(ExecuteArtifactSchema):
+    """An artifact with both an authenticated HTTP URL and a native MCP URI."""
+
+    uri: str
+    mime_type: str
+
+
+class MCPExecuteResponse(ExecuteResponse):
+    artifacts: list[MCPArtifactSchema]
+
+
+def _artifact_uri(tool: str, share: str, path: str) -> str:
+    return (
+        f"clibroker://artifacts/{quote(tool, safe='')}/"
+        f"{quote(share, safe='')}/{quote(path, safe='/')}"
+    )
+
+
+def _execution_result(response: ExecuteResponse) -> CallToolResult:
+    artifacts = [
+        MCPArtifactSchema(
+            **artifact.model_dump(),
+            uri=_artifact_uri(artifact.tool, artifact.share, artifact.path),
+            mime_type=mimetypes.guess_type(artifact.name)[0]
+            or "application/octet-stream",
+        )
+        for artifact in response.artifacts
+    ]
+    result = MCPExecuteResponse(
+        **response.model_dump(exclude={"artifacts"}), artifacts=artifacts
+    )
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=result.model_dump_json()),
+            *[
+                ResourceLink(
+                    type="resource_link",
+                    uri=artifact.uri,
+                    name=artifact.name,
+                    mime_type=artifact.mime_type,
+                    size=artifact.size,
+                )
+                for artifact in artifacts
+            ],
+        ],
+        structured_content=result.model_dump(mode="json"),
+        is_error=not result.ok,
+    )
+
+
+def _register_artifact_resource(
+    mcp: MCPServer,
+    tool: str,
+    share: str,
+    file_shares: FileShareService,
+    allowed_rules: set[str] | None,
+    authenticator: Authenticator,
+) -> None:
+    """Read through the same bearer auth, share RBAC and containment checks as REST."""
+
+    async def read_artifact(path: str, ctx: Context) -> bytes:
+        request = ctx.request_context.request
+        if request is None:
+            raise ResourceError("Artifact reads require bearer authentication")
+        try:
+            client = authenticator.authenticate(request)
+            # Both the routed MCP view and the supplied bearer must grant access.
+            file_shares.get_share(tool, share, allowed_rules)
+            share_cfg = file_shares.get_share(tool, share, client.allow_rules)
+            payload = await asyncio.to_thread(
+                file_shares.read_file,
+                share_cfg,
+                path,
+                encoding="base64",
+            )
+            return base64.b64decode(payload["content"])
+        except HTTPException as exc:
+            raise ResourceError(str(exc.detail)) from exc
+        except FileShareError as exc:
+            raise ResourceError(str(exc)) from exc
+        except Exception as exc:
+            get_audit_logger().exception(
+                "mcp_artifact_read_failed", tool=tool, share=share
+            )
+            raise ResourceError("Unable to read artifact") from exc
+
+    prefix = _artifact_uri(tool, share, "")
+    mcp.resource(
+        prefix + "{+path}",
+        name=f"{tool}__{share}__artifacts",
+        description="Read an artifact using an authorized bearer token. Returns exact file bytes.",
+        mime_type="application/octet-stream",
+    )(read_artifact)
 
 
 def create_mcp_server(
@@ -32,8 +139,10 @@ def create_mcp_server(
     *,
     file_share_service: FileShareService | None = None,
     allowed_rules: set[str] | None = None,
-) -> FastMCP:
-    """Create a FastMCP server with tools derived from the clibroker config.
+    execution_service: ExecutionService | None = None,
+    client_name: str = "mcp",
+) -> MCPServer:
+    """Create an MCP server with tools derived from the clibroker config.
 
     Each allowed rule is registered as a separate MCP tool with a typed
     parameter schema.  Deny rules are excluded entirely — they simply
@@ -46,17 +155,25 @@ def create_mcp_server(
             is in this set.  Used for per-token RBAC so each authenticated
             MCP endpoint only exposes the tools the token is authorized for.
     """
-    mcp = FastMCP(
+    mcp = MCPServer(
         "clibroker",
-        stateless_http=True,
-        json_response=True,
+        version=__version__,
+        subscriptions=False,
+        cache_hints={
+            method: CacheHint(ttl_ms=0, scope="private")
+            for method in (
+                "tools/list",
+                "resources/list",
+                "resources/templates/list",
+                "resources/read",
+            )
+        },
     )
-    # Set paths so they sit at the root of their mount points
-    mcp.settings.streamable_http_path = "/"
-    mcp.settings.sse_path = "/"
-
     if file_share_service is None:
         file_share_service = FileShareService(config)
+    if execution_service is None:
+        execution_service = ExecutionService(policy, file_share_service)
+    authenticator = Authenticator(config)
 
     for tool_name, tool_cfg in config.tools.items():
         for rule in tool_cfg.rules:
@@ -64,26 +181,35 @@ def create_mcp_server(
                 continue
             if allowed_rules is not None and rule.id not in allowed_rules:
                 continue
-            _register_rule_tool(mcp, tool_name, tool_cfg, rule, policy, allowed_rules)
+            _register_rule_tool(
+                mcp, tool_name, rule, execution_service, allowed_rules, client_name
+            )
 
     for tool_name in config.tools:
         if file_share_service.get_client_shares(tool_name, allowed_rules):
             _register_file_tools(mcp, tool_name, file_share_service, allowed_rules)
+            for share in file_share_service.get_client_shares(tool_name, allowed_rules):
+                _register_artifact_resource(
+                    mcp,
+                    tool_name,
+                    share["name"],
+                    file_share_service,
+                    allowed_rules,
+                    authenticator,
+                )
 
     return mcp
 
 
 def _register_rule_tool(
-    mcp: FastMCP,
+    mcp: MCPServer,
     tool_name: str,
-    tool_cfg: ToolConfig,
     rule: Rule,
-    policy: PolicyEngine,
+    execution: ExecutionService,
     allowed_rules: set[str] | None,
+    client_name: str,
 ) -> None:
     """Register a single MCP tool for an allowed policy rule."""
-    log = get_audit_logger()
-
     # Build flag-name mappings: python_param_name -> CLI flag string
     value_flag_map: dict[str, str] = {}
     standalone_flag_map: dict[str, str] = {}
@@ -96,15 +222,14 @@ def _register_rule_tool(
             param_name = _flag_to_param_name(flag, used_param_names)
             standalone_flag_map[param_name] = flag
 
-    # Capture loop variables in default args to avoid late-binding issues
+    # Each registered handler keeps its own rule and argument mappings.
     _rule = rule
     _tool_name = tool_name
-    _tool_cfg = tool_cfg
     _value_flag_map = dict(value_flag_map)
     _standalone_flag_map = dict(standalone_flag_map)
     _allowed_rules = allowed_rules
 
-    async def handler(**kwargs: Any) -> str:
+    async def handler(**kwargs: Any) -> Annotated[CallToolResult, MCPExecuteResponse]:
         """Dynamically-generated tool handler."""
         # Build argv from structured kwargs
         if _rule.allow_any_args:
@@ -139,84 +264,18 @@ def _register_rule_tool(
                 if val is not None:
                     argv.append(str(val))
 
-        # Policy evaluation (defense in depth — the tool's existence already
-        # implies allow, but we still validate flags, positionals, patterns)
         try:
-            result = policy.evaluate(_tool_name, argv)
-        except PolicyError as exc:
-            log.warning(
-                "mcp_policy_error",
-                tool=_tool_name,
-                rule=_rule.id,
-                argv=argv,
-                error=str(exc),
+            response = await execution.execute(
+                _tool_name,
+                argv,
+                client=client_name,
+                allowed_rules=_allowed_rules,
             )
-            return json.dumps({"ok": False, "error": str(exc)})
-        except Exception:
-            # Don't leak internal details for unexpected exceptions
-            log.exception(
-                "mcp_unexpected_error",
-                tool=_tool_name,
-                rule=_rule.id,
-                argv=argv,
-            )
-            return json.dumps({"ok": False, "error": "Internal server error"})
+        except ExecutionForbidden as exc:
+            response = execution_error(str(exc), exc.rule_id)
+        return _execution_result(response)
 
-        # RBAC defense-in-depth: verify the matched rule is authorized
-        # for this token's allowlist, even though tool registration already
-        # filters.  This catches any bugs in the registration filter.
-        if _allowed_rules is not None and result.rule_id not in _allowed_rules:
-            log.warning(
-                "mcp_rbac_denied",
-                tool=_tool_name,
-                rule=result.rule_id,
-                allowed_rules=sorted(_allowed_rules),
-            )
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error": f"Not authorized for rule '{result.rule_id}'",
-                }
-            )
-
-        # Execute
-        run_result = await run_command(
-            result.full_argv,
-            env=_tool_cfg.env or None,
-            cwd=_tool_cfg.working_dir,
-            timeout_s=_tool_cfg.timeout_s,
-            max_output_bytes=_tool_cfg.max_output_bytes,
-        )
-
-        log.info(
-            "mcp_command_executed",
-            tool=_tool_name,
-            matched_rule=_rule.id,
-            argv=result.full_argv,
-            exit_code=run_result.exit_code,
-            duration_ms=run_result.duration_ms,
-            timed_out=run_result.timed_out,
-        )
-
-        # Try to parse stdout as JSON
-        stdout: Any = run_result.stdout
-        try:
-            stdout = json.loads(stdout)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        return json.dumps(
-            {
-                "ok": run_result.exit_code == 0 and not run_result.timed_out,
-                "exit_code": run_result.exit_code,
-                "stdout": stdout,
-                "stderr": run_result.stderr,
-                "duration_ms": run_result.duration_ms,
-                "timed_out": run_result.timed_out,
-            }
-        )
-
-    # --- Build a proper function signature for FastMCP introspection ---
+    # --- Build a proper function signature for MCPServer introspection ---
     params: list[inspect.Parameter] = []
 
     if rule.allow_any_args:
@@ -262,7 +321,7 @@ def _register_rule_tool(
             )
 
     handler.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
-        params, return_annotation=str
+        params, return_annotation=Annotated[CallToolResult, MCPExecuteResponse]
     )
 
     # --- Function metadata ---
@@ -295,12 +354,12 @@ def _register_rule_tool(
         )
     handler.__doc__ = "\n".join(desc_lines)
 
-    # Register with FastMCP
+    # Register with MCPServer
     mcp.tool()(handler)
 
 
 def _register_file_tools(
-    mcp: FastMCP,
+    mcp: MCPServer,
     tool_name: str,
     file_shares: FileShareService,
     allowed_rules: set[str] | None,
