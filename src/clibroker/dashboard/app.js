@@ -2,7 +2,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const I18n = window.DashboardI18n;
-const apiBase = new URL("../../", document.currentScript.src);
+const apiBase = new URL("../", document.currentScript.src);
 let savedLanguage = null;
 try { savedLanguage = localStorage.getItem(I18n.preferenceKey); } catch { /* Storage may be unavailable. */ }
 let language = I18n.detectLanguage(navigator.languages || [navigator.language], savedLanguage);
@@ -273,13 +273,27 @@ function buildArgv(rule) {
     if (value !== "") argv.push(flag, value);
   });
   rule.standalone_flags.forEach((flag, index) => { if ($(`switch-${index}`).checked) argv.push(flag); });
+  const positionals = [];
   rule.positionals.forEach((pos, index) => {
     const value = $(`pos-${index}`).value;
     const values = pos.variadic ? stringArray(value.trim() || "[]", pos.name) : value === "" ? [] : [value];
     if (!values.length) throw new DashboardError(pos.variadic ? "variadicRequired" : "requiredArgument", { name: pos.name });
-    argv.push(...values);
+    positionals.push(...values);
   });
-  if ($("extra-args").value.trim()) argv.push(...stringArray($("extra-args").value, message("extraArguments")));
+  const extra = $("extra-args").value.trim() ? stringArray($("extra-args").value, message("extraArguments")) : [];
+  if (positionals.some((value) => value.startsWith("-"))) {
+    // Keep extra options before the boundary, but preserve the positional tail's order.
+    const tail = [];
+    for (let index = 0; index < extra.length; index += 1) {
+      const arg = extra[index];
+      if (arg === "--") { tail.push(...extra.slice(index + 1)); break; }
+      if (!arg.startsWith("-")) { tail.push(arg); continue; }
+      // Unknown options stay on the option side so server policy still rejects them.
+      argv.push(arg);
+      if (rule.flags.includes(arg) && index + 1 < extra.length) argv.push(extra[++index]);
+    }
+    argv.push("--", ...positionals, ...tail);
+  } else argv.push(...positionals, ...extra);
   return argv;
 }
 function executionBusy(busy) {

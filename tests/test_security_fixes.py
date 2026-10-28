@@ -106,7 +106,47 @@ class TestFlagParserHardening:
         For read_message rule: expects 1 positional (id matching ^[0-9]+$)."""
         result = engine_with_flags.evaluate("himalaya", ["message", "read", "--", "42"])
         assert result.rule_id == "read_message"
-        assert "42" in result.full_argv
+        assert result.full_argv[-2:] == ["--", "42"]
+
+    @pytest.mark.parametrize("variadic", [False, True])
+    @pytest.mark.parametrize(
+        "value", ["--delete", "--unread", "--account=other", "--unread=true", "--"]
+    )
+    def test_explicit_separator_preserves_cli_positional_semantics(
+        self, variadic: bool, value: str
+    ) -> None:
+        config = make_config()
+        config.tools["himalaya"].rules = [
+            Rule(
+                id="literal_values",
+                command=["operate"],
+                flags={"allowed": ["--account"], "standalone": ["--unread"]},
+                positionals=(
+                    [{"name": "values", "variadic": True}]
+                    if variadic
+                    else [{"name": "first"}, {"name": "second"}]
+                ),
+            )
+        ]
+        result = PolicyEngine(config).evaluate(
+            "himalaya",
+            ["operate", "first", "--account=work", "--unread", "--", value],
+        )
+
+        # Flags may move before positionals, but the actual subprocess must keep
+        # the boundary so it cannot interpret these literal values as options.
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "--output",
+            "json",
+            "operate",
+            "--account",
+            "work",
+            "--unread",
+            "--",
+            "first",
+            value,
+        ]
 
     def test_double_dash_flag_like_positional(
         self, engine_with_flags: PolicyEngine

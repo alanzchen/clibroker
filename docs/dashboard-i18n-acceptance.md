@@ -78,3 +78,19 @@ node --test tests/dashboard_i18n.test.cjs
 已知后端与 MCP 2.x 的导入兼容问题仍存在，本次使用 MCP 1.30.0，未修改依赖约束。截图检查发现给导航文字添加翻译节点会继承原图标的固定宽度，已把图标样式限定到 `aria-hidden` 元素，并完整重跑专项浏览器验收后截取最终图片。
 
 没有部署或合并 PR。
+
+## 2026-10-28 审查修复复验
+
+- 修正 API 基址计算：在 `/broker/dashboard/` 和
+  `/broker/dashboard/index.html` 下连接时，请求保留 `/broker/` 前缀；
+  执行请求与复制的 MCP 地址也保留前缀。根路径部署继续可用。
+- 位置参数以 `-` 开头时，面板在选项与位置参数之间加入 `--`。
+  后端保留该分隔符，并停止解析其后形如 `--flag=value` 的字面值。
+  额外选项仍经过策略检查，多值参数和额外位置参数保持原顺序。
+- Python 3.12.14、MCP 1.30.0：`.venv/bin/python -m pytest tests -v`
+  **197 项通过**；`node --test tests/dashboard_*.test.cjs` **12 项通过**。
+- 真实 Chromium 154.0.8037.57 使用仅监听本机的临时服务与临时演示凭证，
+  验证根路径和前缀路径的连接、执行、直接访问 `index.html` 与 MCP 地址复制。
+  演示子进程使用真实 `argparse` 解析参数，确认 `-report.txt` 和
+  `--format=literal` 按原文作为位置参数到达 CLI，额外选项与多值参数顺序正确。
+  没有页面异常；没有连接真实第三方账号，没有部署或合并。

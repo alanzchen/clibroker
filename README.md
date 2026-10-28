@@ -667,6 +667,8 @@ The server includes a lightweight browser client in Simplified Chinese and Engli
 `http://127.0.0.1:8080/dashboard/`. It ships in the Python package and needs no
 Node.js build, external fonts, CDN, or separate frontend server. Start clibroker
 as usual, then open that URL (adjust the host and port to match your config).
+When mounted under a URL prefix, open `<prefix>/dashboard/`; API requests and
+copied MCP endpoints retain that prefix.
 
 ### What works
 
@@ -675,7 +677,10 @@ as usual, then open that URL (adjust the host and port to match your config).
 3. Inspect allowed operations and enter positional arguments, value flags,
    standalone switches, wildcard command segments, and raw argument arrays.
    Tools with configured global arguments also expose a JSON-array input for
-   arguments placed before the command.
+   arguments placed before the command. Positional values beginning with `-`
+   are separated from options with `--`, which is preserved when invoking the CLI.
+   Additional options remain before that separator; extra positional values
+   follow the values entered in the generated fields.
 4. Explicitly confirm and execute through the existing `/execute` endpoint.
 5. Inspect the returned result and a bounded list of this page's operations.
 6. Copy the current token's MCP endpoint for a trusted assistant, refresh
@@ -736,5 +741,5 @@ translations for other languages.
 The optional Node.js development check uses the built-in test runner:
 
 ```bash
-node --test tests/dashboard_i18n.test.cjs
+node --test tests/dashboard_*.test.cjs
 ```
