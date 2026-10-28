@@ -56,7 +56,9 @@ def _artifact_uri(tool: str, share: str, path: str) -> str:
     )
 
 
-def _execution_result(response: ExecuteResponse) -> CallToolResult:
+def _execution_result(
+    response: ExecuteResponse, *, include_resource_links: bool = True
+) -> CallToolResult:
     artifacts = [
         MCPArtifactSchema(
             **artifact.model_dump(),
@@ -81,6 +83,7 @@ def _execution_result(response: ExecuteResponse) -> CallToolResult:
                     size=artifact.size,
                 )
                 for artifact in artifacts
+                if include_resource_links
             ],
         ],
         structured_content=result.model_dump(mode="json"),
@@ -228,6 +231,9 @@ def _register_rule_tool(
     _value_flag_map = dict(value_flag_map)
     _standalone_flag_map = dict(standalone_flag_map)
     _allowed_rules = allowed_rules
+    context_param = "mcp_context"
+    while context_param in used_param_names:
+        context_param += "_"
 
     async def handler(**kwargs: Any) -> Annotated[CallToolResult, MCPExecuteResponse]:
         """Dynamically-generated tool handler."""
@@ -273,7 +279,14 @@ def _register_rule_tool(
             )
         except ExecutionForbidden as exc:
             response = execution_error(str(exc), exc.rule_id)
-        return _execution_result(response)
+        ctx: Context = kwargs[context_param]
+        version = ctx.protocol_version
+        # Resource links were added in 2025-06-18. Older clients reject an
+        # unknown content type even though they can ignore extra result fields.
+        return _execution_result(
+            response,
+            include_resource_links=version is None or version >= "2025-06-18",
+        )
 
     # --- Build a proper function signature for MCPServer introspection ---
     params: list[inspect.Parameter] = []
@@ -320,6 +333,14 @@ def _register_rule_tool(
                 )
             )
 
+    params.append(
+        inspect.Parameter(
+            context_param,
+            inspect.Parameter.KEYWORD_ONLY,
+            annotation=Context,
+        )
+    )
+    handler.__annotations__[context_param] = Context
     handler.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
         params, return_annotation=Annotated[CallToolResult, MCPExecuteResponse]
     )

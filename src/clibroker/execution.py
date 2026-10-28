@@ -7,6 +7,8 @@ import json
 import uuid
 from typing import Any
 
+from pydantic_core import from_json
+
 from .audit import get_audit_logger
 from .file_sharing import FileShareError, FileShareService
 from .models import ExecuteArtifactSchema, ExecuteResponse
@@ -35,8 +37,15 @@ def execution_error(message: str, matched_rule: str = "") -> ExecuteResponse:
 
 def _try_parse_json(value: str) -> Any:
     try:
-        return json.loads(value)
-    except (json.JSONDecodeError, ValueError):
+        # The bounded parser rejects unpaired surrogates and stops at 200
+        # nesting levels, leaving room for the REST/MCP response envelopes.
+        parsed = from_json(value, allow_inf_nan=False)
+        # Finite-looking JSON numbers such as 1e999 can still overflow a float.
+        json.dumps(parsed, allow_nan=False)
+        return parsed
+    except ValueError:
+        # Preserve the command's exact output when it cannot be represented
+        # faithfully in a typed JSON result.
         return value
 
 

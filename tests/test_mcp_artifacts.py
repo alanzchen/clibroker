@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import pytest
 from asgi_lifespan import LifespanManager
@@ -471,15 +471,17 @@ async def test_resource_read_caps_a_file_that_grows_after_stat(tmp_path, monkeyp
     config = make_artifact_config(tmp_path)
     path = tmp_path / "artifacts" / "growing.bin"
     path.write_bytes(b"small")
-    original_open = Path.open
+    original_fstat = os.fstat
+    inode = path.stat().st_ino
 
-    def grow_before_read(self, mode="r", *args, **kwargs):
-        if self == path and mode == "rb":
-            with original_open(self, "ab") as stream:
+    def grow_after_stat(fd):
+        snapshot = original_fstat(fd)
+        if snapshot.st_ino == inode:
+            with path.open("ab") as stream:
                 stream.write(b"x" * 256)
-        return original_open(self, mode, *args, **kwargs)
+        return snapshot
 
-    monkeypatch.setattr(Path, "open", grow_before_read)
+    monkeypatch.setattr(os, "fstat", grow_after_stat)
     async with running(config) as (_, client):
         response = await rpc(
             client,

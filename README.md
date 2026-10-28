@@ -490,10 +490,14 @@ object for clients that consume text. Policy failures, authorization failures,
 nonzero exits, timeouts, and artifact capture failures set MCP `isError: true`.
 Error details are in `stderr`; this replaces the old MCP-only `error` field.
 SDK-level input validation errors may instead contain only an error text block.
+Stdout is parsed as JSON when it can be represented safely in the response;
+otherwise the original text is retained, including non-finite numbers, invalid
+Unicode escapes, and excessively nested JSON.
 
 An `artifact_capture` rule works identically over REST and MCP. On MCP, each
-artifact also includes `uri` and `mime_type`, and appears as a native
-`resource_link` content block. For example:
+artifact also includes `uri` and `mime_type`. Clients using MCP 2025-06-18 or
+newer also receive a native `resource_link` content block; older clients can use
+the artifact URLs in the JSON text result. For example:
 
 ```text
 clibroker://artifacts/himalaya/attachments/runs/<execution-id>/receipt.pdf
@@ -513,6 +517,8 @@ for a tool can read that tool's shares. They are not private to the execution
 that created them. Reads recheck path containment and `max_file_bytes`, and
 reflect the current file on disk. Moving or deleting a file invalidates its old
 URI. Listing and resource results carry `cacheScope: "private"` and `ttlMs: 0`.
+MCP resource and file-tool reads use POSIX descriptor-relative opens to reject
+symlink replacements during a read; they fail closed on unsupported platforms.
 
 ### Current protocol requests
 
