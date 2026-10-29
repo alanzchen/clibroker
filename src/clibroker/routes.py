@@ -73,6 +73,11 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
             rules.append(
                 ClientRuleSchema(
                     id=rule.id,
+                    title=rule.title,
+                    description=rule.description,
+                    decision=request.app.state.control.decision(client.name, rule)
+                    if request.app.state.control
+                    else "allow",
                     command=rule.command,
                     allow_any_args=rule.allow_any_args,
                     flags=rule.flags.allowed if rule.flags else [],
@@ -118,6 +123,8 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
             tools.append(
                 ClientToolSchema(
                     name=tool_name,
+                    title=tool_cfg.title,
+                    description=tool_cfg.description,
                     rules=rules,
                     file_shares=client_file_shares,
                     argv_normalization=argv_normalization,
@@ -132,6 +139,7 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
         mcp_url=f"/mcp/{slug}/",
         sse_url=f"/sse/{slug}/",
         tools=tools,
+        control={"enabled": request.app.state.control is not None, "role": client.role},
     )
 
 
@@ -149,6 +157,8 @@ def get_shared_file(
     file_shares: FileShareService = request.app.state.file_share_service
     client: AuthenticatedClient = authenticator.authenticate(request)
 
+    if request.app.state.control:
+        request.app.state.control.ensure_active(client.name)
     try:
         share_cfg = file_shares.get_share(tool, share, client.allow_rules)
         local_path, _ = file_shares.local_path_for_read(share_cfg, path)

@@ -67,9 +67,7 @@ class GlobalArgPattern(BaseModel):
     @model_validator(mode="after")
     def _validate_position_policy(self) -> "GlobalArgPattern":
         if self.canonical_position not in self.allow_positions:
-            raise ValueError(
-                "canonical_position must be included in allow_positions"
-            )
+            raise ValueError("canonical_position must be included in allow_positions")
         return self
 
 
@@ -130,6 +128,9 @@ class Rule(BaseModel):
     id: str
     command: list[str] = Field(..., min_length=1)  # e.g. ["message", "move"]
     effect: Literal["allow", "deny"] = "allow"
+    title: str = ""
+    description: str = ""
+    require_approval: bool = False
     allow_any_args: bool = False
     flags: FlagConfig | None = None
     inject_args: list[str] = Field(default_factory=list)
@@ -222,6 +223,8 @@ class FileSharingConfig(BaseModel):
 class ToolConfig(BaseModel):
     """Configuration for a single wrapped CLI tool."""
 
+    title: str = ""
+    description: str = ""
     executable: str  # must be absolute path
     default_args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
@@ -244,6 +247,7 @@ class TokenConfig(BaseModel):
     """A bearer token with associated RBAC rule allowlist."""
 
     name: str
+    role: Literal["agent", "owner"] = "agent"
     value: str  # literal or "env:VAR_NAME"
     allow_rules: list[str]
 
@@ -267,9 +271,17 @@ class AuthConfig(BaseModel):
     tokens: list[TokenConfig] = Field(default_factory=list)
 
 
+class ControlConfig(BaseModel):
+    """Optional persistent owner control panel; the database contains private data."""
+
+    database_path: str = Field(min_length=1)
+    approval_ttl_s: int = Field(default=86400, ge=1, le=604800)
+
+
 class ServerConfig(BaseModel):
     """Top-level server settings."""
 
+    control: ControlConfig | None = None
     bind: str = "127.0.0.1:8080"
     auth: AuthConfig = AuthConfig()
     request_timeout_s: float = 30.0
@@ -281,6 +293,48 @@ class Config(BaseModel):
 
     server: ServerConfig = ServerConfig()
     tools: dict[str, ToolConfig]
+
+    @model_validator(mode="after")
+    def _check_control_config(self) -> Config:
+        names = [token.name for token in self.server.auth.tokens]
+        if self.server.control:
+            identifiers = names + [
+                rule.id for tool in self.tools.values() for rule in tool.rules
+            ]
+            if any(
+                not value or re.search(r"[\x00-\x1f\x7f/\\]", value)
+                for value in identifiers
+            ):
+                raise ValueError(
+                    "Control token names and rule IDs must not contain path separators or control characters"
+                )
+            values = [token.resolve_value() for token in self.server.auth.tokens]
+            if len(values) != len(set(values)) or any(not value for value in values):
+                raise ValueError("Control requires distinct nonempty token values")
+            if len(names) != len(set(names)):
+                raise ValueError("Control requires unique token names")
+            database = Path(self.server.control.database_path).expanduser().resolve()
+            for tool in self.tools.values():
+                roots = [
+                    Path(share.path).resolve() for share in tool.file_sharing.shares
+                ]
+                if (
+                    tool.file_sharing.expose_working_dir
+                    and tool.working_dir
+                    and Path(tool.working_dir).is_absolute()
+                ):
+                    roots.append(Path(tool.working_dir).resolve())
+                if any(database.is_relative_to(root) for root in roots):
+                    raise ValueError(
+                        "Control database must be outside every exposed file share and working directory"
+                    )
+            if not any(token.role == "owner" for token in self.server.auth.tokens):
+                raise ValueError("Control requires at least one owner token")
+        if not self.server.control and any(
+            rule.require_approval for tool in self.tools.values() for rule in tool.rules
+        ):
+            raise ValueError("require_approval requires server.control")
+        return self
 
     @model_validator(mode="after")
     def _check_rule_ids_unique(self) -> Config:

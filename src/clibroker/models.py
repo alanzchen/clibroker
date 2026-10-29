@@ -37,6 +37,9 @@ class ExecuteArtifactSchema(BaseModel):
 class ExecuteResponse(BaseModel):
     """Structured response returned after command execution."""
 
+    request_id: str | None = None
+    state: str | None = None
+    approval_url: str | None = None
     ok: bool
     exit_code: int
     stdout: Any  # str or parsed JSON dict/list
@@ -60,6 +63,9 @@ class ClientRuleSchema(BaseModel):
     """An allow rule exposed through the client discovery endpoint."""
 
     id: str
+    title: str = ""
+    description: str = ""
+    decision: str = "allow"
     command: list[str]
     allow_any_args: bool = False
     flags: list[str] = Field(default_factory=list)
@@ -97,6 +103,8 @@ class ClientToolSchema(BaseModel):
     """A token-scoped tool schema for the client discovery endpoint."""
 
     name: str
+    title: str = ""
+    description: str = ""
     rules: list[ClientRuleSchema]
     file_shares: list[ClientFileShareSchema] = Field(default_factory=list)
     argv_normalization: ClientArgvNormalizationSchema | None = None
@@ -112,3 +120,6 @@ class ClientConfigResponse(BaseModel):
     mcp_url: str
     sse_url: str
     tools: list[ClientToolSchema]
+    control: dict[str, Any] = Field(
+        default_factory=lambda: {"enabled": False, "role": "agent"}
+    )
