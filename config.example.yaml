@@ -80,7 +80,11 @@ tools:
       # Absolute working_dir values are exposed as a read-only share named
       # "working_dir" by default.  Set this to false to disable that default.
       expose_working_dir: true
+      # Per-file quota for downloads, writes, and artifact collection; 0 disables it.
       max_file_bytes: 1048576
+      # Inline/MCP reads always stay bounded. When omitted, inherit a positive
+      # max_file_bytes, or use 1048576 bytes if max_file_bytes is 0.
+      # max_inline_read_bytes: 1048576
       shares:
         - name: attachments
           path: /srv/clibroker/attachments

@@ -206,6 +206,7 @@ class FileSharingConfig(BaseModel):
 
     expose_working_dir: bool = True
     max_file_bytes: int = Field(default=1_048_576, ge=0)
+    max_inline_read_bytes: int | None = Field(default=None, gt=0)
     shares: list[FileShareConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
