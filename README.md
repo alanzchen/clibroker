@@ -739,75 +739,115 @@ src/clibroker/
 - no graceful child-process shutdown on app stop yet
 - regex patterns come directly from config, so pattern quality matters
 - the client currently supports only the direct HTTP backend
-- the client CLI does not have dedicated file commands; use MCP file tools or authenticated `/files/...` URLs
 
 ## Browser Dashboard
 
-The server includes a lightweight browser client in Simplified Chinese and English at
-`http://127.0.0.1:8080/dashboard/`. It ships in the Python package and needs no
-Node.js build, external fonts, CDN, or separate frontend server. Start clibroker
-as usual, then open that URL (adjust the host and port to match your config).
-When mounted under a URL prefix, open `<prefix>/dashboard/`; API requests and
-copied MCP endpoints retain that prefix.
+Open `http://127.0.0.1:8080/dashboard/` after starting the server. The English and
+Simplified Chinese dashboard ships in the Python package, with no frontend build,
+CDN, or separate web server. Prefix deployments use `<prefix>/dashboard/`.
 
-### What works
+### Try the complete workflow locally
 
-1. Connect using an existing bearer token from `server.auth.tokens`.
-2. Discover the current token's tools through the existing `/client-config` API.
-3. Inspect allowed operations and enter positional arguments, value flags,
-   standalone switches, wildcard command segments, and raw argument arrays.
-   Tools with configured global arguments also expose a JSON-array input for
-   arguments placed before the command. Positional values beginning with `-`
-   are separated from options with `--`, which is preserved when invoking the CLI.
-   Additional options remain before that separator; extra positional values
-   follow the values entered in the generated fields.
-4. Explicitly confirm and execute through the existing `/execute` endpoint.
-5. Inspect the returned result and a bounded list of this page's operations.
-6. Copy the current token's MCP endpoint for a trusted assistant, refresh
-   discovery, switch credentials, or disconnect.
+```bash
+clibroker init --directory ./clibroker-local
+clibroker --config ./clibroker-local/config.yaml
+```
 
-The dashboard is a client, not an administration console. It cannot create
-third-party OAuth connections, register assistants, edit policy, or implement
-company/personal tenant isolation. Configure CLI accounts and credentials on
-the server as before. Displayed tools mean *configured and visible to this
-credential*, not a verified live connection to a third-party account. A visible
-allow rule does not guarantee execution: deny rules, argument validation, and
-per-token authorization still apply on the server.
+`init` creates a private directory with a ready-to-run configuration, a harmless
+Python demo tool, and separate owner and agent credential files. It refuses to
+overwrite an existing setup. Follow its printed paths to open the dashboard and
+copy a credential; credentials are not printed to the terminal.
 
-### Security and data scope
+1. Open the dashboard with the agent credential and run the automatic demo action.
+2. Run the demo action that requires approval. It appears as awaiting review.
+3. In a second tab, connect with the owner credential, open **Needs you**, inspect
+   the exact request, and choose **Approve once** or **Reject**.
+4. Return to the agent tab to see the result in activity. Refresh, reconnect, and
+   confirm the history remains. Owner controls also let you pause an agent or
+   change an eligible operation to Allow, Ask, or Block.
 
-- The static dashboard shell is public. All discovery and execution requests
-  still require the existing bearer authentication and policy enforcement.
-- Use HTTPS for remote access, or a local loopback address. Prefer a dedicated,
-  least-privilege token for browser use rather than a broadly privileged token.
-- The language selector covers interface text, validation, results labels and
-  activity times. Browser language preferences choose the initial language; an
-  unsupported language falls back to English. The explicit choice is remembered
-  as `clibroker.language` in local storage (only `en` or `zh-CN`). If storage is
-  blocked, language switching still works for the current page. Tool names,
-  argument names, rule names and service output remain in their original language.
-  Switching languages preserves the current connection, open forms and execution
-  confirmation; editing arguments still clears confirmation.
-- Credentials remain in page memory only, never in local/session storage,
-  cookies, or URL query parameters. Refreshing or disconnecting clears them.
-  Treat the copied MCP URL as sensitive: its opaque slug grants access under
-  the server's existing MCP transport model.
-- The client sends credentials only to fixed, same-origin API paths and refuses
-  redirects. Tool names, error messages, and execution output are rendered as
-  text, never HTML. Assets use a restrictive Content Security Policy.
-- Activity contains no command argument values or command output; it records up
-  to 30 operations initiated in the current page. It is **not** server-wide
-  audit history, does not include other agents' REST/MCP calls, and is cleared
-  when switching credentials or reloading. Server audit logging is unchanged.
-- Execution requires an explicit confirmation on every submission; editing
-  parameters clears that confirmation. The form is locked while executing.
-  Changing credentials and closing the action dialog are disabled while awaiting an
-  execution response. A network timeout or error does not prove the command
-  failed; check the actual result before submitting again.
+The generated demo only returns sample output. To connect real tools, configure
+CLI executables, accounts, and their permitted commands in the generated YAML.
+Use `title` and `description` on tools and rules for readable labels. Each agent
+should have a separate credential; owner credentials are for human management.
 
-The friendly layout uses the existing discovery document without adding any
-new administrative or execution APIs. Tool names and operation names come
-from your configuration, so use clear names for a more approachable experience.
+### Enable persistent control on an existing installation
+
+```yaml
+server:
+  control:
+    database_path: /absolute/private/path/clibroker.sqlite3
+    approval_ttl_s: 86400
+  auth:
+    tokens:
+      - name: owner
+        role: owner
+        value: env:CLIBROKER_OWNER_TOKEN
+        allow_rules: []
+      - name: assistant
+        role: agent
+        value: env:CLIBROKER_AGENT_TOKEN
+        allow_rules: [read_messages, send_message]
+```
+
+Use unique agent names and distinct credentials. The owner can review all
+requests and manage configured agents; agent credentials can read only their own
+requests and history. Owner management access does not itself grant CLI execution
+permissions. Set `require_approval: true` on an allowed rule to require review;
+this requirement cannot be removed through the dashboard. Runtime rules can
+restrict configured permissions, but cannot override policy denies or grant a
+rule absent from the agent's `allow_rules`.
+
+The dashboard provides:
+
+- **Needs you:** persistent pending requests with exact tool/arguments, requester,
+  expiry, and approve/reject controls for owners.
+- **Agents and rules:** pause/resume and Allow/Ask/Block controls for configured
+  command capabilities. Pause also stops new HTTP file access, MCP file tools,
+  and MCP resource reads. Already-running operations are not undone.
+- **Recent activity:** saved REST/MCP command requests, outcomes, search/filtering,
+  request details, and authenticated artifact downloads.
+- **My tools:** generated argument forms, human-readable descriptions, an exact
+  request preview, explicit manual confirmation, and execution results.
+- **Assistant access:** the token's MCP endpoint and setup instructions. The
+  assistant must be able to reach the broker; localhost works on the same machine.
+
+### Approval and activity behavior
+
+When an authorized action needs approval, `/execute` returns `ok: false` with
+`state: pending`, `request_id`, and `approval_url`. The request has not run.
+The agent polls `GET /control/requests/<id>` with its credential to retrieve its
+state and eventual result. MCP agents can use `clibroker_request_status` for the
+same purpose. An owner decides through the dashboard or
+`POST /control/requests/<id>/decision` with `{"decision":"approve"}` or
+`{"decision":"reject"}`.
+
+An approval applies to the stored request exactly once. Expired or rejected
+requests never run. Approval rechecks current access and configuration; changed
+configuration requires a new request. Interrupted operations are not automatically
+retried because their external outcome may be unknown. Command arguments and
+bounded results are private data stored in the local SQLite database; protect
+its directory and backups. The database must be outside every exposed file
+share and shared working directory. History is bounded, rather than an unlimited
+audit archive. Existing structured server audit logs remain available separately.
+
+File-share access retains its configured read/read-write rules. Command approval
+settings do not add per-file approval. Agent creation, credential rotation,
+third-party account login, and executable configuration remain server setup
+operations. A displayed tool means configured and visible to the current
+credential; it does not certify that an external account is connected.
+
+### Compatibility and browser security
+
+Without `server.control`, existing configurations continue to work with the
+manual tool dashboard and page-local activity. Configuring `require_approval`
+without persistent control fails validation rather than executing automatically.
+
+The dashboard keeps credentials in memory only; reloading requires reconnecting.
+It stores only the language preference in browser storage. Requests are limited
+to same-origin API paths and refuse redirects. Server content is rendered as
+text under a restrictive Content Security Policy. Use HTTPS remotely or loopback
+locally. Treat MCP endpoint slugs as sensitive under the existing transport model.
 
 ### Extending and checking dashboard translations
 
