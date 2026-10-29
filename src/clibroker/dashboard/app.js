@@ -216,7 +216,7 @@ function renderActivity() {
   }
 }
 function resultSummary(result) {
-  return message(result.state === "pending" ? "statePending" : result.ok ? "completed" : result.timed_out ? "resultTimedOut" : "notCompleted");
+  return message(result.state === "pending" ? "statePending" : result.state === "running" ? "stateRunning" : result.ok ? "completed" : result.timed_out ? "resultTimedOut" : "notCompleted");
 }
 function renderResult() {
   const signature = JSON.stringify([language, isOwner(), lastResult]);
@@ -232,8 +232,8 @@ function renderResult() {
     milliseconds: new Intl.NumberFormat(language).format(Math.round(result.duration_ms)),
   }), "", t("output"), stdout || t("none"), "", t("errorOutput"), result.stderr || t("none")].join("\n");
   $("result-json").textContent = JSON.stringify(result, null, 2);
-  if (result.state === "pending") {
-    $("result").textContent = t("requestPendingHelp");
+  if (["pending", "running"].includes(result.state)) {
+    $("result").textContent = t(result.state === "running" ? "stateRunning" : "requestPendingHelp");
     const review = element("button", message(isOwner() ? "review" : "details"), "button secondary");
     review.addEventListener("click", () => openRequest(result.request_id));
     $("result-artifacts").append(review);
@@ -539,12 +539,12 @@ async function refreshControl() {
         } else currentRequest = { ...updated, result: currentRequest.result };
       }
     }
-    if (lastResult?.state === "pending") {
+    if (["pending", "running"].includes(lastResult?.state)) {
       const updated = (next.activity || []).find(item => item.id === lastResult.request_id);
       if (updated && updated.state !== "pending") {
         const full = await request(`control/requests/${encodeURIComponent(updated.id)}`, token);
         if (generation !== current || controlVersion !== version) return;
-        if (lastResult?.request_id === updated.id && full.result) lastResult = full.result;
+        if (lastResult?.request_id === updated.id) lastResult = full.result || { ...lastResult, state: full.state, stderr: stateLabel(full.state) };
       }
     }
   } catch (error) {
