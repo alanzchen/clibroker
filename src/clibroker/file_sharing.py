@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hashlib
 import logging
+import os
 import shutil
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -281,17 +284,9 @@ class FileShareService:
         *,
         encoding: str = "auto",
     ) -> dict[str, Any]:
-        root, candidate, resolved, rel_path = self._existing_path(share, path)
-        if not resolved.is_file():
-            raise FileShareError(f"Path '{rel_path}' is not a file")
-
-        size = resolved.stat().st_size
-        if size > share.max_file_bytes:
-            raise FileShareTooLarge(
-                f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
-            )
-
-        data = resolved.read_bytes()
+        root, _candidate, resolved, rel_path = self._existing_path(share, path)
+        data = self._read_contained_bytes(share, root, resolved, rel_path)
+        size = len(data)
         if encoding == "auto":
             try:
                 content = data.decode("utf-8")
@@ -318,6 +313,68 @@ class FileShareService:
             "content": content,
             "download_url": self.url_for(share.tool_name, share.name, rel_path),
         }
+
+    def _read_contained_bytes(
+        self,
+        share: ResolvedFileShare,
+        root: Path,
+        resolved: Path,
+        rel_path: str,
+    ) -> bytes:
+        """Pin each canonical path component before reading a regular file.
+
+        Resolving first permits symlinks whose targets stay inside the share.
+        Descriptor-relative, no-follow opens then reject a replacement symlink
+        anywhere in that canonical path, including ancestors of the share root.
+        """
+        if os.name != "posix" or not all(
+            hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")
+        ):
+            raise FileShareError("Safe file reads require POSIX descriptor support")
+
+        relative_parts = resolved.relative_to(root).parts
+        if not relative_parts:
+            raise FileShareError(f"Path '{rel_path}' is not a file")
+        directory_flags = (
+            getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        directory_fd = None
+        file_fd = None
+        try:
+            directory_fd = os.open(root.anchor, directory_flags)
+            for part in (*root.parts[1:], *relative_parts[:-1]):
+                child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = child_fd
+            file_fd = os.open(relative_parts[-1], file_flags, dir_fd=directory_fd)
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise FileShareError(f"Path '{rel_path}' is not a file")
+            if file_stat.st_size > share.max_file_bytes:
+                raise FileShareTooLarge(
+                    f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
+                )
+            with os.fdopen(file_fd, "rb") as stream:
+                file_fd = None  # The stream owns this descriptor now.
+                # The same open file can still grow after fstat.
+                data = stream.read(share.max_file_bytes + 1)
+            if len(data) > share.max_file_bytes:
+                raise FileShareTooLarge(
+                    f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
+                )
+            return data
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise FileShareForbidden("Path changed or contains a symlink") from exc
+            if exc.errno == errno.ENOENT:
+                raise FileShareNotFound(f"Path '{rel_path}' was not found") from exc
+            self._raise_os_error("read", rel_path, exc)
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            if directory_fd is not None:
+                os.close(directory_fd)
 
     def write_file(
         self,

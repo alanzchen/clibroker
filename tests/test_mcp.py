@@ -544,7 +544,8 @@ class TestStreamableHTTP:
         content = body["result"]["content"]
         result_data = json.loads(content[0]["text"])
         assert result_data["ok"] is False
-        assert "error" in result_data
+        assert result_data["stderr"]
+        assert body["result"]["isError"] is True
 
 
 class TestSSEEndpoint:
