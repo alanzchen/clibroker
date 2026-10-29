@@ -21,6 +21,7 @@ from .config import Config
 ShareAccess = Literal["read", "read_write"]
 logger = logging.getLogger("clibroker.file_sharing")
 _MAX_LIST_ENTRIES = 10_000
+_DEFAULT_INLINE_READ_BYTES = 1_048_576
 
 
 class FileShareError(Exception):
@@ -62,6 +63,7 @@ class ResolvedFileShare:
     root: Path
     access: ShareAccess
     max_file_bytes: int
+    max_inline_read_bytes: int | None = None
 
 
 class FileShareService:
@@ -89,6 +91,7 @@ class FileShareService:
                     root=Path(tool_cfg.working_dir),
                     access="read",
                     max_file_bytes=sharing_cfg.max_file_bytes,
+                    max_inline_read_bytes=sharing_cfg.max_inline_read_bytes,
                 )
 
             for share in sharing_cfg.shares:
@@ -98,6 +101,7 @@ class FileShareService:
                     root=Path(share.path),
                     access=share.access,
                     max_file_bytes=sharing_cfg.max_file_bytes,
+                    max_inline_read_bytes=sharing_cfg.max_inline_read_bytes,
                 )
 
             self._shares[tool_name] = tool_shares
@@ -216,7 +220,9 @@ class FileShareService:
         """Return a safe local path for authenticated HTTP read/download."""
 
         _, _, resolved, rel_path = self._existing_path(share, path)
-        if resolved.is_file() and resolved.stat().st_size > share.max_file_bytes:
+        if resolved.is_file() and _exceeds_file_limit(
+            resolved.stat().st_size, share.max_file_bytes
+        ):
             raise FileShareTooLarge(
                 f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
             )
@@ -269,7 +275,9 @@ class FileShareService:
             if not entry.is_file():
                 continue
             metadata = self._metadata(share, root, entry)
-            if metadata["size"] is None or metadata["size"] > share.max_file_bytes:
+            if metadata["size"] is None or _exceeds_file_limit(
+                metadata["size"], share.max_file_bytes
+            ):
                 continue
             metadata["sha256"] = _sha256_file(entry)
             artifacts.append(metadata)
@@ -335,6 +343,7 @@ class FileShareService:
         relative_parts = resolved.relative_to(root).parts
         if not relative_parts:
             raise FileShareError(f"Path '{rel_path}' is not a file")
+        read_limit, limit_name = _inline_read_limit(share)
         directory_flags = (
             getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
         )
@@ -351,17 +360,17 @@ class FileShareService:
             file_stat = os.fstat(file_fd)
             if not stat.S_ISREG(file_stat.st_mode):
                 raise FileShareError(f"Path '{rel_path}' is not a file")
-            if file_stat.st_size > share.max_file_bytes:
+            if file_stat.st_size > read_limit:
                 raise FileShareTooLarge(
-                    f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
+                    f"File '{rel_path}' exceeds {limit_name} ({read_limit})"
                 )
             with os.fdopen(file_fd, "rb") as stream:
                 file_fd = None  # The stream owns this descriptor now.
                 # The same open file can still grow after fstat.
-                data = stream.read(share.max_file_bytes + 1)
-            if len(data) > share.max_file_bytes:
+                data = stream.read(read_limit + 1)
+            if len(data) > read_limit:
                 raise FileShareTooLarge(
-                    f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
+                    f"File '{rel_path}' exceeds {limit_name} ({read_limit})"
                 )
             return data
         except OSError as exc:
@@ -387,7 +396,7 @@ class FileShareService:
     ) -> dict[str, Any]:
         self._require_write(share)
         data = self._decode_content(content, encoding)
-        if len(data) > share.max_file_bytes:
+        if _exceeds_file_limit(len(data), share.max_file_bytes):
             raise FileShareTooLarge(
                 f"Write exceeds max_file_bytes ({share.max_file_bytes})"
             )
@@ -742,6 +751,21 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _exceeds_file_limit(size: int, max_file_bytes: int) -> bool:
+    """A configured zero disables the per-file quota."""
+    return max_file_bytes > 0 and size > max_file_bytes
+
+
+def _inline_read_limit(share: ResolvedFileShare) -> tuple[int, str]:
+    """Keep buffered reads bounded even when the per-file quota is disabled."""
+    inline_limit = share.max_inline_read_bytes
+    if inline_limit is None:
+        inline_limit = share.max_file_bytes or _DEFAULT_INLINE_READ_BYTES
+    if share.max_file_bytes > 0 and share.max_file_bytes <= inline_limit:
+        return share.max_file_bytes, "max_file_bytes"
+    return inline_limit, "max_inline_read_bytes"
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

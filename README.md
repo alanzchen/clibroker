@@ -155,6 +155,29 @@ File sharing behavior:
 - host paths are never exposed through `/client-config`, MCP tool results, or file URLs
 - file paths must stay under the share root; absolute paths, `..`, backslashes, NUL bytes, and symlink escapes are rejected
 
+`max_file_bytes` defaults to 1 MiB (1,048,576 bytes). Set it to `0` to remove
+the per-file quota for HTTP downloads, writes, and artifact collection. Positive
+values continue to enforce that quota.
+
+Inline reads (`<tool>__files_read` and MCP `resources/read`) load and encode the
+file in memory, so they always have a finite limit. Set `max_inline_read_bytes`
+to a positive byte count to configure it. When omitted, it inherits a positive
+`max_file_bytes`, or defaults to 1 MiB when `max_file_bytes` is `0`. A positive
+per-file quota also applies to inline reads; the smaller limit wins.
+
+For large attachments that should be downloaded over HTTP:
+
+```yaml
+file_sharing:
+  max_file_bytes: 0
+  max_inline_read_bytes: 1048576
+```
+
+Large files still appear in execution artifacts and can be fetched through their
+authenticated `download_url`, even when they exceed the inline-read limit.
+Writes still arrive as complete request payloads; disabling their quota does not
+make them streaming uploads.
+
 Rules that create files can declare `artifact_capture`. The broker creates a
 per-execution directory inside the configured share, expands `{artifact_dir}` in
 server-injected args, and returns produced files in the `artifacts` field.
@@ -514,9 +537,10 @@ downloads, and the REST response format is unchanged.
 
 Resources use the existing share authorization model: tokens with an allow rule
 for a tool can read that tool's shares. They are not private to the execution
-that created them. Reads recheck path containment and `max_file_bytes`, and
-reflect the current file on disk. Moving or deleting a file invalidates its old
-URI. Listing and resource results carry `cacheScope: "private"` and `ttlMs: 0`.
+that created them. Reads recheck path containment and the applicable per-file
+and inline-read size limits, and reflect the current file on disk. Moving or
+deleting a file invalidates its old URI. Listing and resource results carry
+`cacheScope: "private"` and `ttlMs: 0`.
 MCP resource and file-tool reads use POSIX descriptor-relative opens to reject
 symlink replacements during a read; they fail closed on unsupported platforms.
 
