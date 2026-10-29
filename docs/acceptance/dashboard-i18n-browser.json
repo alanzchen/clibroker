@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-22T10:39:25.142Z",
+  "browser": "156.0.8078.4",
+  "languages": [
+    "en",
+    "zh-CN"
+  ],
+  "checks": [
+    "English first visit follows navigator language; page title, navigation, aria labels and controls are English",
+    "Open connection dialog switches language without clearing input; existing required-field and real 401 errors retranslate",
+    "Language can change during a real connection request; granted tools and empty credential input remain correct",
+    "Switching an open operation preserves parameters and confirmation; edits clear confirmation; local validation reinterprets in either language",
+    "Language switches during a real delayed demo subprocess execution; controls stay locked, exactly one request completes, and raw output remains unchanged",
+    "Existing activity labels and time format switch in place; tool names, rule names, argument values and service data remain original",
+    "Variadic labels, pattern and enum help, and required-value errors switch languages while raw JSON values execute unchanged",
+    "Explicit English/Chinese choice survives reload while credentials do not; real offline network error retranslates and recovers",
+    "Credential switching and disconnect preserve only the language preference, with token-scoped visibility",
+    "English mobile UI completes real execution and fits 390px and 320px without page-level horizontal overflow",
+    "Unsupported browser locale falls back to English; language still switches when browser storage is blocked",
+    "No page exceptions, unexpected console errors or external requests; expected invalid-token and offline diagnostics are recorded"
+  ],
+  "screenshots": [
+    "clibroker-i18n-result-en.png",
+    "clibroker-i18n-home-en.png",
+    "clibroker-i18n-home-zh.png",
+    "clibroker-i18n-mobile-en.png"
+  ],
+  "pageErrors": [],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: net::ERR_INTERNET_DISCONNECTED"
+  ],
+  "requestFailures": [
+    {
+      "path": "/client-config",
+      "error": "net::ERR_INTERNET_DISCONNECTED"
+    }
+  ],
+  "externalRequests": [],
+  "dataScope": "Disposable loopback-only demo; echo-only tools and a delayed Python echo fixture; no production accounts, external translation service or mocked API results"
+}

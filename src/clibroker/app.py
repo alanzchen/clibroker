@@ -18,6 +18,7 @@ from .mcp_server import create_mcp_server
 from .middleware import TimeoutMiddleware
 from .policy import PolicyEngine
 from .routes import router
+from .web import DashboardFiles
 
 
 def _token_slug(value: str) -> str:
@@ -112,6 +113,9 @@ def create_app(config: Config) -> FastAPI:
 
     # REST API routes (matched before mounts)
     app.include_router(router)
+
+    # Public static client; data APIs retain bearer auth and RBAC.
+    app.mount("/dashboard", DashboardFiles(), name="dashboard")
 
     # Mount per-token MCP endpoints using opaque slug (not raw token)
     for slug, entry in mcp_servers.items():

@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-22T10:19:45.813Z",
+  "browser": "156.0.8078.4",
+  "applicationBaseCommit": "1f0e729caf43ddbdc1ca819075c9b34273d0890d",
+  "applicationChange": "Mobile tool-text flex basis reserves its own row; screenshots include this fix",
+  "desktopViewport": {
+    "width": 1440,
+    "height": 1100
+  },
+  "mobileViewport": {
+    "width": 390,
+    "height": 844
+  },
+  "dataScope": "Disposable loopback-only service, synthetic clearly labelled demo data, /usr/bin/echo only, no real user accounts or production credentials",
+  "checks": [
+    "Public shell renders with CSP; starts disconnected",
+    "Invalid demonstration credential rejected with a readable error",
+    "Credential-scoped discovery shows only three granted demo tools; browser storage stays empty",
+    "Structured positional, flag and switch form renders; confirmation is required and cleared on edits",
+    "Confirmed real /execute request runs echo and displays success, output, and one activity row",
+    "Discovery refresh preserves page activity; desktop screenshot captured",
+    "Wildcard command segment and raw JSON argv execute against real echo tool",
+    "Switching to a restricted credential reduces visibility and clears activity; disconnect clears the page",
+    "Direct index.html resolves API paths correctly; reload forgets the connection",
+    "390px mobile flow connects and executes; 390px tool names stay on one line; 390px and 320px layouts have no page-level horizontal overflow",
+    "No JavaScript page errors, unexpected console errors, failed requests or external network requests; one expected 401 rejection"
+  ],
+  "screenshots": [
+    "clibroker-acceptance-result.png",
+    "clibroker-acceptance-desktop.png",
+    "clibroker-acceptance-mobile.png"
+  ],
+  "pageErrors": [],
+  "externalRequests": [],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "requestFailures": [],
+  "notVerified": [
+    "Firefox, Safari or physical mobile devices",
+    "Real third-party integrations",
+    "MCP assistant end-to-end connections",
+    "Remote HTTPS/proxy deployment"
+  ],
+  "environmentNote": "Fresh unconstrained installation selected MCP 2.3.0 and could not import mcp.server.fastmcp. Acceptance used mcp==1.30.0 in an isolated environment. Project dependency constraints were not changed.",
+  "pytest": {
+    "command": "<isolated-venv>/bin/python -m pytest tests -v --basetemp=<temporary-directory>/pytest-final",
+    "result": "187 passed in 5.25s",
+    "exitCode": 0
+  }
+}
