@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from pydantic_core import from_json
+from fastapi import HTTPException
 
 from .audit import get_audit_logger
 from .file_sharing import FileShareError, FileShareService
@@ -61,7 +62,10 @@ def _expand_artifact_arg(arg: str, context: dict[str, str]) -> str:
 class ExecutionService:
     """Execute validated commands for either transport with identical safeguards."""
 
-    def __init__(self, policy: PolicyEngine, file_shares: FileShareService) -> None:
+    def __init__(
+        self, policy: PolicyEngine, file_shares: FileShareService, control=None
+    ) -> None:
+        self.control = control
         self.policy = policy
         self.file_shares = file_shares
 
@@ -74,10 +78,16 @@ class ExecutionService:
         allowed_rules: set[str] | list[str] | None,
     ) -> ExecuteResponse:
         try:
+            if self.control is not None:
+                return await self.control.execute(
+                    self, tool, argv, client=client, allowed_rules=allowed_rules
+                )
             return await self._execute(
                 tool, argv, client=client, allowed_rules=allowed_rules
             )
         except ExecutionForbidden:
+            raise
+        except HTTPException:
             raise
         except Exception:
             # Keep local paths, environment values and other internals out of responses.

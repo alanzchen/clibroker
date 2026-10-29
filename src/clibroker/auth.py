@@ -29,6 +29,7 @@ class AuthenticatedClient:
 
     name: str
     allow_rules: list[str]
+    role: str = "agent"
 
 
 class Authenticator:
@@ -78,6 +79,7 @@ class Authenticator:
         return AuthenticatedClient(
             name=matched_cfg.name,
             allow_rules=matched_cfg.allow_rules,
+            role=matched_cfg.role,
         )
 
     @staticmethod

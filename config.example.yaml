@@ -43,9 +43,17 @@ server:
   bind: "127.0.0.1:8080"
   request_timeout_s: 30.0
   max_output_bytes: 1048576
+  # Optional persistent owner controls. Add an owner token before enabling.
+  # control:
+  #   database_path: /srv/clibroker/private/control.sqlite3
+  #   approval_ttl_s: 86400
   auth:
     type: bearer
     tokens:
+      # - name: owner
+      #   role: owner
+      #   value: "env:CLIBROKER_OWNER_TOKEN"
+      #   allow_rules: []  # Owner management does not need CLI execution access.
       - name: reader
         value: "env:CLIBROKER_TOKEN_READER"
         allow_rules:
@@ -68,6 +76,8 @@ server:
 
 tools:
   himalaya:
+    title: Email
+    description: Read and organize messages through the configured Himalaya account.
     executable: /usr/local/bin/himalaya
     default_args: ["--output", "json"]
     env:
@@ -109,6 +119,8 @@ tools:
             variadic: true
 
       - id: read_message
+        title: Read a message
+        description: Retrieve one message by its identifier.
         command: ["message", "read"]
         effect: allow
         inject_args: ["--preview"]
@@ -135,6 +147,9 @@ tools:
             pattern: "^[0-9]+$"
 
       - id: move_message
+        title: Move a message
+        description: Move a message to another folder.
+        # require_approval: true  # Requires server.control and an owner token.
         command: ["message", "move"]
         effect: allow
         flags:

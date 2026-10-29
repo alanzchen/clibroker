@@ -30,8 +30,9 @@ from mcp.types import CallToolResult, ResourceLink, TextContent
 
 from . import __version__
 from .audit import get_audit_logger
-from .auth import Authenticator
+from .auth import AuthenticatedClient, Authenticator
 from .config import Config, Rule
+from .control import ControlService
 from .execution import ExecutionForbidden, ExecutionService, execution_error
 from .file_sharing import FileShareError, FileShareService
 from .models import ExecuteArtifactSchema, ExecuteResponse
@@ -87,7 +88,7 @@ def _execution_result(
             ],
         ],
         structured_content=result.model_dump(mode="json"),
-        is_error=not result.ok,
+        is_error=not result.ok and result.state != "pending",
     )
 
 
@@ -98,6 +99,8 @@ def _register_artifact_resource(
     file_shares: FileShareService,
     allowed_rules: set[str] | None,
     authenticator: Authenticator,
+    control=None,
+    client_name: str = "mcp",
 ) -> None:
     """Read through the same bearer auth, share RBAC and containment checks as REST."""
 
@@ -107,6 +110,9 @@ def _register_artifact_resource(
             raise ResourceError("Artifact reads require bearer authentication")
         try:
             client = authenticator.authenticate(request)
+            if control:
+                control.ensure_active(client_name)
+                control.ensure_active(client.name)
             # Both the routed MCP view and the supplied bearer must grant access.
             file_shares.get_share(tool, share, allowed_rules)
             share_cfg = file_shares.get_share(tool, share, client.allow_rules)
@@ -175,8 +181,45 @@ def create_mcp_server(
     if file_share_service is None:
         file_share_service = FileShareService(config)
     if execution_service is None:
-        execution_service = ExecutionService(policy, file_share_service)
+        execution_service = ExecutionService(
+            policy,
+            file_share_service,
+            ControlService(config) if config.server.control else None,
+        )
     authenticator = Authenticator(config)
+
+    if execution_service.control:
+        control = execution_service.control
+        token = control.token(client_name)
+        if token is None:
+            raise ValueError(
+                "Control-enabled MCP servers require a configured client_name"
+            )
+        configured_rules = set(token.allow_rules)
+        allowed_rules = (
+            configured_rules
+            if allowed_rules is None
+            else configured_rules & set(allowed_rules)
+        )
+
+        @mcp.tool()
+        def clibroker_request_status(request_id: str) -> str:
+            """Poll a command request after the owner reviews its approval link.
+
+            Pending requests must not be resubmitted. Poll this tool to retrieve
+            the final result; interrupted operations must not be auto-retried.
+            """
+            if token is None:
+                return json.dumps({"error": "Agent not configured"})
+            try:
+                control.ensure_active(client_name)
+                result = control.request(
+                    request_id,
+                    AuthenticatedClient(token.name, token.allow_rules, "agent"),
+                )
+                return json.dumps(result)
+            except HTTPException as exc:
+                return json.dumps({"error": str(exc.detail)})
 
     for tool_name, tool_cfg in config.tools.items():
         for rule in tool_cfg.rules:
@@ -190,7 +233,14 @@ def create_mcp_server(
 
     for tool_name in config.tools:
         if file_share_service.get_client_shares(tool_name, allowed_rules):
-            _register_file_tools(mcp, tool_name, file_share_service, allowed_rules)
+            _register_file_tools(
+                mcp,
+                tool_name,
+                file_share_service,
+                allowed_rules,
+                execution_service.control,
+                client_name,
+            )
             for share in file_share_service.get_client_shares(tool_name, allowed_rules):
                 _register_artifact_resource(
                     mcp,
@@ -199,6 +249,8 @@ def create_mcp_server(
                     file_share_service,
                     allowed_rules,
                     authenticator,
+                    execution_service.control,
+                    client_name,
                 )
 
     return mcp
@@ -351,7 +403,9 @@ def _register_rule_tool(
     handler.__qualname__ = func_name
 
     # Build a human-readable description
-    desc_lines = [f"Execute: {tool_name} {' '.join(rule.command)}"]
+    desc_lines = (
+        [rule.title, rule.description] if rule.title or rule.description else []
+    ) + [f"Execute: {tool_name} {' '.join(rule.command)}"]
     if rule.inject_args:
         desc_lines.append(f"Injected args: {' '.join(rule.inject_args)}")
     if rule.allow_any_args:
@@ -384,6 +438,8 @@ def _register_file_tools(
     tool_name: str,
     file_shares: FileShareService,
     allowed_rules: set[str] | None,
+    control=None,
+    client_name: str = "mcp",
 ) -> None:
     """Register MCP tools for safe file operations on a wrapped tool."""
 
@@ -392,12 +448,16 @@ def _register_file_tools(
     share_names = ", ".join(share["name"] for share in shares)
 
     def _get_share(share: str):
+        if control:
+            control.ensure_active(client_name)
         return file_shares.get_share(tool_name, share, allowed_rules)
 
     def _success(payload: dict[str, Any]) -> str:
         return json.dumps(payload)
 
     def _error(exc: Exception) -> str:
+        if isinstance(exc, HTTPException):
+            return json.dumps({"ok": False, "error": str(exc.detail)})
         if isinstance(exc, FileShareError):
             return json.dumps({"ok": False, "error": str(exc)})
         log.exception("mcp_file_unexpected_error", tool=tool_name)

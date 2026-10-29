@@ -12,6 +12,8 @@ from starlette.responses import JSONResponse
 from .audit import configure_logging
 from .auth import Authenticator
 from .config import Config
+from .control import ControlService
+from .control_routes import router as control_router
 from .execution import ExecutionService
 from .file_sharing import FileShareService
 from .mcp_server import create_mcp_server
@@ -53,7 +55,8 @@ def create_app(config: Config) -> FastAPI:
 
     policy = PolicyEngine(config)
     file_share_service = FileShareService(config)
-    execution_service = ExecutionService(policy, file_share_service)
+    control = ControlService(config) if config.server.control else None
+    execution_service = ExecutionService(policy, file_share_service, control)
 
     # --- Per-token MCP servers ---
     # Map slug -> {mcp, streamable, sse, name}
@@ -101,6 +104,7 @@ def create_app(config: Config) -> FastAPI:
     )
 
     # Attach shared state
+    app.state.control = control
     app.state.config = config
     app.state.policy = policy
     app.state.file_share_service = file_share_service
@@ -111,8 +115,16 @@ def create_app(config: Config) -> FastAPI:
     # Middleware (outermost first)
     app.add_middleware(TimeoutMiddleware, timeout_s=config.server.request_timeout_s)
 
+    @app.middleware("http")
+    async def private_responses(request: Request, call_next):
+        response = await call_next(request)
+        if request.headers.get("authorization") or "/control" in request.url.path:
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     # REST API routes (matched before mounts)
     app.include_router(router)
+    app.include_router(control_router)
 
     # Public static client; data APIs retain bearer auth and RBAC.
     app.mount("/dashboard", DashboardFiles(), name="dashboard")
@@ -158,6 +170,7 @@ def create_app(config: Config) -> FastAPI:
         slug = _token_slug(token_value)
         return {
             "name": client.name,
+            "role": client.role,
             "slug": slug,
             "mcp_url": f"/mcp/{slug}/",
             "sse_url": f"/sse/{slug}/",

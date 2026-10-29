@@ -6,3 +6,6 @@ __pycache__/
 build/
 dist/
 .coverage
+
+# Private credentials and state from the default first-run setup.
+/clibroker-local/

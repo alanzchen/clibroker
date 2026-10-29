@@ -3,18 +3,46 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 import uvicorn
 
 from .app import create_app
 from .config import load_config
+from .setup import initialize
 
 
 def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "init":
+        parser = argparse.ArgumentParser(
+            prog="clibroker init",
+            description="Create a private local demo and owner dashboard",
+        )
+        parser.add_argument(
+            "--directory",
+            default="clibroker-local",
+            help="New private setup directory (default: ./clibroker-local)",
+        )
+        args = parser.parse_args(argv[1:])
+        try:
+            config_path = initialize(args.directory)
+        except (OSError, ValueError) as exc:
+            parser.exit(1, f"Setup failed: {exc}\n")
+        print(f"Created local demo: {config_path}")
+        print(f"Start: clibroker --config {shlex.quote(str(config_path))}")
+        print("Open: http://127.0.0.1:8080/dashboard/")
+        print(f"Owner sign-in credential: {config_path.parent / 'owner-token.txt'}")
+        print(f"Assistant credential: {config_path.parent / 'agent-token.txt'}")
+        print(
+            "Use the owner credential in the dashboard. Try Check your connection, then Try an approval."
+        )
+        return
     parser = argparse.ArgumentParser(
         prog="clibroker",
         description="Policy-driven CLI command broker",
+        epilog="First time? Run clibroker init --directory ./clibroker-local",
     )
     parser.add_argument(
         "--config",

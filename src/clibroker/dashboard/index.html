@@ -13,8 +13,9 @@
   <aside class="sidebar" aria-label="Main navigation" data-i18n-aria-label="navigation">
     <a class="brand" href="./"><span class="brand-mark" aria-hidden="true">▥</span> clibroker</a>
     <nav>
-      <a href="#main" class="nav-link"><span aria-hidden="true">⌂</span> <span data-i18n="home">Home</span></a>
+      <a href="#main" class="nav-link"><span aria-hidden="true">⌂</span> <span data-i18n="home">Overview</span></a>
       <a href="#tools-section" class="nav-link"><span aria-hidden="true">▤</span> <span data-i18n="tools">My tools</span></a>
+      <a href="#agents-section" class="nav-link" id="agents-nav" hidden><span aria-hidden="true">✧</span> <span data-i18n="agents">Agents and rules</span></a>
       <a href="#assistant-section" class="nav-link"><span aria-hidden="true">✧</span> <span data-i18n="assistants">Assistant access</span></a>
       <a href="#activity-section" class="nav-link"><span aria-hidden="true">◷</span> <span data-i18n="activity">Recent activity</span></a>
       <a href="#settings-section" class="nav-link"><span aria-hidden="true">⚙</span> <span data-i18n="settings">Connection settings</span></a>
@@ -23,17 +24,29 @@
   </aside>
   <main id="main" tabindex="-1">
     <header class="topbar"><span class="eyebrow"><span data-i18n="topline">Your tools, ready when you are</span></span><button id="connect-button" class="button secondary"><span data-i18n="connectService">Connect service</span></button><div class="language-control"><label><span data-i18n="language">Language</span><select data-language aria-label="Language" data-i18n-aria-label="language"></select></label></div></header>
-    <section class="hero">
+    <section class="hero" id="overview-hero">
       <div class="eyebrow"><span data-i18n="eyebrow">One place · Many tools</span></div>
       <h1><span data-i18n="headline">Put your tools to work with the assistant you choose</span></h1>
       <p><span data-i18n="heroDescription">See what your assistant can do and confirm each operation.</span></p>
     </section>
-    <ol class="steps" aria-label="Getting started" data-i18n-aria-label="gettingStarted">
+    <ol class="steps" id="setup-steps" aria-label="Getting started" data-i18n-aria-label="gettingStarted">
       <li><span>1</span><div><span data-i18n="connectService">Connect service</span><small><span data-i18n="stepCredential">Use an existing access credential</span></small></div></li>
       <li><span>2</span><div><span data-i18n="viewTools">View tools</span><small><span data-i18n="stepVisibility">Only the tools you can access</span></small></div></li>
       <li><span>3</span><div><span data-i18n="chooseOperation">Choose an operation</span><small><span data-i18n="stepConfirm">Confirm before executing</span></small></div></li>
     </ol>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="control-section" class="panel control-panel" aria-labelledby="control-title" hidden>
+      <div class="section-heading"><div><span class="eyebrow" data-i18n="controlEyebrow">Your attention, where it matters</span><h2 id="control-title" data-i18n="needsYou">Needs you</h2><p id="control-summary"></p></div><button id="control-refresh" class="button secondary" data-i18n="refresh">Refresh</button></div>
+      <p id="control-error" class="error" role="alert" hidden></p>
+      <div id="pending-requests" class="request-list"></div>
+      <div class="control-stats"><div><strong id="pending-count">0</strong><span data-i18n="pendingLabel">Awaiting review</span></div><div><strong id="recent-count">0</strong><span data-i18n="recentLabel">Recent requests</span></div><div><strong id="access-mode">—</strong><span data-i18n="accessMode">Access mode</span></div></div>
+    </section>
+    <section id="agents-section" class="panel agents-panel" aria-labelledby="agents-title" hidden>
+      <div class="section-heading"><div><h2 id="agents-title" data-i18n="agents">Agents and rules</h2><p data-i18n="agentsHelp">Choose what each agent may do. Server policy remains the maximum access.</p></div></div>
+      <p class="fine-print" data-i18n="agentProvisioning">Agents are configured by the server administrator. Pause access here or adjust a permitted operation.</p>
+      <p class="fine-print" data-i18n="fileAccessNotice">These rules govern command execution. File shares keep their configured read/write access. Pausing an agent stops both.</p>
+      <div id="agents" class="agent-list"></div>
+    </section>
     <div class="overview-grid">
       <section class="panel" id="tools-section" aria-labelledby="tools-title">
         <div class="section-heading"><div><h2 id="tools-title"><span data-i18n="tools">My tools</span></h2><p id="tools-subtitle"><span data-i18n="toolsWaiting">Your tools appear here after you connect.</span></p></div><button id="refresh-button" class="button subtle" disabled><span data-i18n="refresh">Refresh</span></button></div>
@@ -42,12 +55,14 @@
       <section class="panel" id="assistant-section" aria-labelledby="assistant-title">
         <div class="section-heading"><div><h2 id="assistant-title"><span data-i18n="assistants">Assistant access</span></h2><p><span data-i18n="permissionsCredential">Permissions come from the current access credential.</span></p></div></div>
         <div class="assistant-card"><div class="avatar" aria-hidden="true">✧</div><div><h3 id="client-name"><span data-i18n="waitingConnection">Waiting for connection</span></h3><p id="client-summary"><span data-i18n="clientWaiting">Connect to see available tools and operations.</span></p></div></div>
-        <div class="tip"><h3><span data-i18n="assistantReuse">Keep your tools when you switch assistants</span></h3><p><span data-i18n="assistantInstructions">Configure this service’s MCP endpoint in your assistant using its assigned credential.</span></p><button id="copy-mcp" class="button secondary" disabled><span data-i18n="copyMcp">Copy MCP endpoint</span></button></div>
+        <div class="tip"><h3 id="assistant-setup-title"><span data-i18n="assistantReuse">Keep your tools when you switch assistants</span></h3><p id="assistant-setup-help"><span data-i18n="assistantInstructions">Configure this service’s MCP endpoint in your assistant using its assigned credential.</span></p><button id="copy-mcp" class="button secondary" disabled><span data-i18n="copyMcp">Copy MCP endpoint</span></button></div>
+        <details class="setup-details"><summary data-i18n="setupGuide">Assistant setup guide</summary><ol><li data-i18n="setupOne">Open your assistant’s MCP or connector settings and choose a remote HTTP server.</li><li data-i18n="setupTwo">Copy the endpoint above and add the agent’s assigned bearer credential in its authorization settings.</li><li data-i18n="setupThree">Ask the assistant to list its available tools. Requests follow this credential’s server permissions.</li></ol><p class="fine-print" data-i18n="setupOwnerWarning">Use a dedicated agent credential for assistants. Owner credentials can manage rules and approve requests.</p><p class="fine-print" data-i18n="setupReachability">The assistant must be able to reach this service. A localhost address works only on the same machine.</p></details>
         <p class="fine-print"><span data-i18n="assistantPrivacy">Share the endpoint only with trusted assistants. Ask the administrator to add assistants or change permissions.</span></p>
       </section>
     </div>
     <section class="panel activity-panel" id="activity-section" aria-labelledby="activity-title">
-      <div class="section-heading"><div><h2 id="activity-title"><span data-i18n="activityTitle">What happened recently</span></h2><p><span data-i18n="activityScope">Only operations started on this page are recorded. Reloading clears them.</span></p></div><button class="button subtle" id="clear-activity" disabled><span data-i18n="clearActivity">Clear history</span></button></div>
+      <div class="section-heading"><div><h2 id="activity-title"><span data-i18n="activityTitle">What happened recently</span></h2><p id="activity-scope"><span data-i18n="activityScope">Only operations started on this page are recorded. Reloading clears them.</span></p></div><button class="button subtle" id="clear-activity" disabled><span data-i18n="clearActivity">Clear history</span></button></div>
+      <div id="history-filters" class="history-filters" hidden><label><span data-i18n="filterActivity">Search activity</span><input id="activity-search" type="search" placeholder="Agent, tool, or rule" data-i18n-placeholder="searchPlaceholder" autocomplete="off"></label><label><span data-i18n="filterOutcome">Outcome</span><select id="activity-state"><option value="" data-i18n="allOutcomes">All outcomes</option><option value="succeeded" data-i18n="stateSucceeded">Completed</option><option value="pending" data-i18n="statePending">Awaiting approval</option><option value="failed" data-i18n="stateFailed">Failed</option><option value="blocked" data-i18n="stateBlocked">Blocked</option><option value="rejected" data-i18n="stateRejected">Rejected</option><option value="expired" data-i18n="stateExpired">Expired</option></select></label></div>
       <div id="activity"><p class="empty-line"><span data-i18n="activityEmpty">No operations yet. Choose a tool to see its available operations.</span></p></div>
     </section>
     <section class="settings" id="settings-section" aria-labelledby="settings-title"><div><h2 id="settings-title"><span data-i18n="settings">Connection settings</span></h2><p><span data-i18n="credentialPrivacy">Credentials stay in page memory and are cleared on reload or disconnect. Use HTTPS or a local address.</span></p><p><span data-i18n="adminSettings">The administrator configures third-party accounts, tool permissions, and assistant credentials.</span></p></div><button id="disconnect-button" class="button secondary" disabled><span data-i18n="disconnect">Disconnect</span></button></section>
@@ -74,12 +89,19 @@
       <label for="operation"><span data-i18n="chooseOperation">Choose an operation</span></label><select id="operation" required></select>
       <div id="parameters"></div>
       <details id="extra-details"><summary id="extra-summary"><span data-i18n="moreArguments">More arguments</span></summary><label id="extra-args-label" for="extra-args"><span data-i18n="extraArguments">Extra arguments (JSON string array)</span></label><textarea id="extra-args" rows="2" placeholder="[&quot;--account&quot;, &quot;personal&quot;]"></textarea><p class="fine-print"><span data-i18n="extraHelp">Enter each argument as a separate array item. Server policy still applies.</span></p></details>
+      <div class="command-preview"><h3 data-i18n="requestPreview">Request preview</h3><p id="operation-description" class="fine-print"></p><pre id="argv-preview" tabindex="0"></pre><p class="fine-print" data-i18n="previewHelp">This is the exact tool and argument array submitted. The server applies configured defaults and policy.</p></div>
       <div class="execution-warning"><span data-i18n="executionWarning">This executes a real operation and may change data. Review the operation and arguments first.</span></div>
       <label class="check-row"><input id="confirm-execution" type="checkbox" required> <span data-i18n="confirmLabel">I have reviewed this operation and its arguments</span></label>
       <p id="execute-error" class="error" role="alert" hidden></p>
       <div class="dialog-actions"><button type="button" class="button secondary" data-close="tool-dialog"><span data-i18n="close">Close</span></button><button id="execute-submit" class="button primary" type="submit"><span data-i18n="execute">Confirm and execute</span></button></div>
     </form>
-    <div id="result-section" hidden><h3 id="result-title"><span data-i18n="resultTitle">Operation result</span></h3><pre id="result" tabindex="0"></pre><details><summary><span data-i18n="fullResult">Full response and file details</span></summary><pre id="result-json" tabindex="0"></pre></details></div>
+    <div id="result-section" hidden><h3 id="result-title"><span data-i18n="resultTitle">Operation result</span></h3><pre id="result" tabindex="0"></pre><details><summary><span data-i18n="fullResult">Full response and file details</span></summary><pre id="result-json" tabindex="0"></pre></details><div id="result-artifacts" class="artifact-list"></div></div>
+  </dialog>
+  <dialog id="request-dialog" aria-labelledby="request-title">
+    <div class="dialog-heading"><div><span class="eyebrow" data-i18n="requestDetails">Request details</span><h2 id="request-title"></h2></div><button class="icon-button" data-close="request-dialog" aria-label="Close" data-i18n-aria-label="close">×</button></div>
+    <div id="request-detail"></div>
+    <p id="review-error" class="error" role="alert" hidden></p>
+    <div class="dialog-actions" id="review-actions"><button id="reject-request" class="button secondary danger" data-i18n="rejectRequest">Reject</button><button id="approve-request" class="button primary" data-i18n="approveRequest">Approve once</button></div>
   </dialog>
 </body>
 </html>
