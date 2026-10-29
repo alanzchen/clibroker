@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="pageTitle">clibroker · My tools and assistants</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./i18n.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main"><span data-i18n="skip">Skip to main content</span></a>
+  <aside class="sidebar" aria-label="Main navigation" data-i18n-aria-label="navigation">
+    <a class="brand" href="./"><span class="brand-mark" aria-hidden="true">▥</span> clibroker</a>
+    <nav>
+      <a href="#main" class="nav-link"><span aria-hidden="true">⌂</span> <span data-i18n="home">Home</span></a>
+      <a href="#tools-section" class="nav-link"><span aria-hidden="true">▤</span> <span data-i18n="tools">My tools</span></a>
+      <a href="#assistant-section" class="nav-link"><span aria-hidden="true">✧</span> <span data-i18n="assistants">Assistant access</span></a>
+      <a href="#activity-section" class="nav-link"><span aria-hidden="true">◷</span> <span data-i18n="activity">Recent activity</span></a>
+      <a href="#settings-section" class="nav-link"><span aria-hidden="true">⚙</span> <span data-i18n="settings">Connection settings</span></a>
+    </nav>
+    <div class="sidebar-note"><span class="status-dot" id="connection-dot"></span><span id="connection-label"><span data-i18n="disconnected">Not connected</span></span><p><span data-i18n="sidebarNote">Your tools. Your choice of assistant.</span></p></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="topbar"><span class="eyebrow"><span data-i18n="topline">Your tools, ready when you are</span></span><button id="connect-button" class="button secondary"><span data-i18n="connectService">Connect service</span></button><div class="language-control"><label><span data-i18n="language">Language</span><select data-language aria-label="Language" data-i18n-aria-label="language"></select></label></div></header>
+    <section class="hero">
+      <div class="eyebrow"><span data-i18n="eyebrow">One place · Many tools</span></div>
+      <h1><span data-i18n="headline">Put your tools to work with the assistant you choose</span></h1>
+      <p><span data-i18n="heroDescription">See what your assistant can do and confirm each operation.</span></p>
+    </section>
+    <ol class="steps" aria-label="Getting started" data-i18n-aria-label="gettingStarted">
+      <li><span>1</span><div><span data-i18n="connectService">Connect service</span><small><span data-i18n="stepCredential">Use an existing access credential</span></small></div></li>
+      <li><span>2</span><div><span data-i18n="viewTools">View tools</span><small><span data-i18n="stepVisibility">Only the tools you can access</span></small></div></li>
+      <li><span>3</span><div><span data-i18n="chooseOperation">Choose an operation</span><small><span data-i18n="stepConfirm">Confirm before executing</span></small></div></li>
+    </ol>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="overview-grid">
+      <section class="panel" id="tools-section" aria-labelledby="tools-title">
+        <div class="section-heading"><div><h2 id="tools-title"><span data-i18n="tools">My tools</span></h2><p id="tools-subtitle"><span data-i18n="toolsWaiting">Your tools appear here after you connect.</span></p></div><button id="refresh-button" class="button subtle" disabled><span data-i18n="refresh">Refresh</span></button></div>
+        <div id="tools" class="tool-list"><div class="empty"><span class="empty-icon" aria-hidden="true">▤</span><h3><span data-i18n="emptyTitle">Connect to your clibroker first</span></h3><p><span data-i18n="emptyDescription">Use an existing credential to discover your configured tools.</span></p><button class="button primary" id="empty-connect"><span data-i18n="connectService">Connect service</span> <span aria-hidden="true">→</span></button></div></div>
+      </section>
+      <section class="panel" id="assistant-section" aria-labelledby="assistant-title">
+        <div class="section-heading"><div><h2 id="assistant-title"><span data-i18n="assistants">Assistant access</span></h2><p><span data-i18n="permissionsCredential">Permissions come from the current access credential.</span></p></div></div>
+        <div class="assistant-card"><div class="avatar" aria-hidden="true">✧</div><div><h3 id="client-name"><span data-i18n="waitingConnection">Waiting for connection</span></h3><p id="client-summary"><span data-i18n="clientWaiting">Connect to see available tools and operations.</span></p></div></div>
+        <div class="tip"><h3><span data-i18n="assistantReuse">Keep your tools when you switch assistants</span></h3><p><span data-i18n="assistantInstructions">Configure this service’s MCP endpoint in your assistant using its assigned credential.</span></p><button id="copy-mcp" class="button secondary" disabled><span data-i18n="copyMcp">Copy MCP endpoint</span></button></div>
+        <p class="fine-print"><span data-i18n="assistantPrivacy">Share the endpoint only with trusted assistants. Ask the administrator to add assistants or change permissions.</span></p>
+      </section>
+    </div>
+    <section class="panel activity-panel" id="activity-section" aria-labelledby="activity-title">
+      <div class="section-heading"><div><h2 id="activity-title"><span data-i18n="activityTitle">What happened recently</span></h2><p><span data-i18n="activityScope">Only operations started on this page are recorded. Reloading clears them.</span></p></div><button class="button subtle" id="clear-activity" disabled><span data-i18n="clearActivity">Clear history</span></button></div>
+      <div id="activity"><p class="empty-line"><span data-i18n="activityEmpty">No operations yet. Choose a tool to see its available operations.</span></p></div>
+    </section>
+    <section class="settings" id="settings-section" aria-labelledby="settings-title"><div><h2 id="settings-title"><span data-i18n="settings">Connection settings</span></h2><p><span data-i18n="credentialPrivacy">Credentials stay in page memory and are cleared on reload or disconnect. Use HTTPS or a local address.</span></p><p><span data-i18n="adminSettings">The administrator configures third-party accounts, tool permissions, and assistant credentials.</span></p></div><button id="disconnect-button" class="button secondary" disabled><span data-i18n="disconnect">Disconnect</span></button></section>
+    <footer>clibroker <span><span data-i18n="footer">Your tools within reach. Your permissions in view.</span></span></footer>
+  </main>
+  <dialog id="connect-dialog" aria-labelledby="connect-title">
+    <div class="language-control"><label><span data-i18n="language">Language</span><select data-language aria-label="Language" data-i18n-aria-label="language"></select></label></div>
+
+    <form id="connect-form" novalidate>
+      <div class="dialog-heading"><div><span class="eyebrow"><span data-i18n="gettingStarted">Getting started</span></span><h2 id="connect-title"><span data-i18n="connectTitle">Connect to your service</span></h2></div><button type="button" class="icon-button" data-close="connect-dialog" aria-label="Close" data-i18n-aria-label="close">×</button></div>
+      <p><span data-i18n="connectInstructions">Enter the access credential provided by your administrator. This connects only to the clibroker service hosting this page.</span></p>
+      <label for="token"><span data-i18n="credential">Access credential</span></label><input id="token" type="password" autocomplete="off" spellcheck="false" required placeholder="Paste your bearer token" data-i18n-placeholder="credentialPlaceholder">
+      <p class="fine-print"><span data-i18n="connectPrivacy">Never saved in browser storage, URLs, or logs. Switching credentials clears this page’s history.</span></p>
+      <p id="connect-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="button secondary" data-close="connect-dialog"><span data-i18n="cancel">Cancel</span></button><button type="submit" class="button primary" id="connect-submit"><span data-i18n="connect">Connect</span></button></div>
+    </form>
+  </dialog>
+  <dialog id="tool-dialog" aria-labelledby="tool-title">
+    <div class="language-control"><label><span data-i18n="language">Language</span><select data-language aria-label="Language" data-i18n-aria-label="language"></select></label></div>
+
+    <div class="dialog-heading"><div><span class="eyebrow"><span data-i18n="toolPermissions">Tools and permissions</span></span><h2 id="tool-title"></h2></div><button class="icon-button" data-close="tool-dialog" aria-label="Close" data-i18n-aria-label="close">×</button></div>
+    <p><span data-i18n="ruleWarning">These operations are advertised by the server. Arguments and deny rules are checked again when you execute.</span></p>
+    <form id="execute-form" novalidate>
+      <label for="operation"><span data-i18n="chooseOperation">Choose an operation</span></label><select id="operation" required></select>
+      <div id="parameters"></div>
+      <details id="extra-details"><summary id="extra-summary"><span data-i18n="moreArguments">More arguments</span></summary><label id="extra-args-label" for="extra-args"><span data-i18n="extraArguments">Extra arguments (JSON string array)</span></label><textarea id="extra-args" rows="2" placeholder="[&quot;--account&quot;, &quot;personal&quot;]"></textarea><p class="fine-print"><span data-i18n="extraHelp">Enter each argument as a separate array item. Server policy still applies.</span></p></details>
+      <div class="execution-warning"><span data-i18n="executionWarning">This executes a real operation and may change data. Review the operation and arguments first.</span></div>
+      <label class="check-row"><input id="confirm-execution" type="checkbox" required> <span data-i18n="confirmLabel">I have reviewed this operation and its arguments</span></label>
+      <p id="execute-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="button secondary" data-close="tool-dialog"><span data-i18n="close">Close</span></button><button id="execute-submit" class="button primary" type="submit"><span data-i18n="execute">Confirm and execute</span></button></div>
+    </form>
+    <div id="result-section" hidden><h3 id="result-title"><span data-i18n="resultTitle">Operation result</span></h3><pre id="result" tabindex="0"></pre><details><summary><span data-i18n="fullResult">Full response and file details</span></summary><pre id="result-json" tabindex="0"></pre></details></div>
+  </dialog>
+</body>
+</html>

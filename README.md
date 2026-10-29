@@ -740,3 +740,86 @@ src/clibroker/
 - regex patterns come directly from config, so pattern quality matters
 - the client currently supports only the direct HTTP backend
 - the client CLI does not have dedicated file commands; use MCP file tools or authenticated `/files/...` URLs
+
+## Browser Dashboard
+
+The server includes a lightweight browser client in Simplified Chinese and English at
+`http://127.0.0.1:8080/dashboard/`. It ships in the Python package and needs no
+Node.js build, external fonts, CDN, or separate frontend server. Start clibroker
+as usual, then open that URL (adjust the host and port to match your config).
+When mounted under a URL prefix, open `<prefix>/dashboard/`; API requests and
+copied MCP endpoints retain that prefix.
+
+### What works
+
+1. Connect using an existing bearer token from `server.auth.tokens`.
+2. Discover the current token's tools through the existing `/client-config` API.
+3. Inspect allowed operations and enter positional arguments, value flags,
+   standalone switches, wildcard command segments, and raw argument arrays.
+   Tools with configured global arguments also expose a JSON-array input for
+   arguments placed before the command. Positional values beginning with `-`
+   are separated from options with `--`, which is preserved when invoking the CLI.
+   Additional options remain before that separator; extra positional values
+   follow the values entered in the generated fields.
+4. Explicitly confirm and execute through the existing `/execute` endpoint.
+5. Inspect the returned result and a bounded list of this page's operations.
+6. Copy the current token's MCP endpoint for a trusted assistant, refresh
+   discovery, switch credentials, or disconnect.
+
+The dashboard is a client, not an administration console. It cannot create
+third-party OAuth connections, register assistants, edit policy, or implement
+company/personal tenant isolation. Configure CLI accounts and credentials on
+the server as before. Displayed tools mean *configured and visible to this
+credential*, not a verified live connection to a third-party account. A visible
+allow rule does not guarantee execution: deny rules, argument validation, and
+per-token authorization still apply on the server.
+
+### Security and data scope
+
+- The static dashboard shell is public. All discovery and execution requests
+  still require the existing bearer authentication and policy enforcement.
+- Use HTTPS for remote access, or a local loopback address. Prefer a dedicated,
+  least-privilege token for browser use rather than a broadly privileged token.
+- The language selector covers interface text, validation, results labels and
+  activity times. Browser language preferences choose the initial language; an
+  unsupported language falls back to English. The explicit choice is remembered
+  as `clibroker.language` in local storage (only `en` or `zh-CN`). If storage is
+  blocked, language switching still works for the current page. Tool names,
+  argument names, rule names and service output remain in their original language.
+  Switching languages preserves the current connection, open forms and execution
+  confirmation; editing arguments still clears confirmation.
+- Credentials remain in page memory only, never in local/session storage,
+  cookies, or URL query parameters. Refreshing or disconnecting clears them.
+  Treat the copied MCP URL as sensitive: its opaque slug grants access under
+  the server's existing MCP transport model.
+- The client sends credentials only to fixed, same-origin API paths and refuses
+  redirects. Tool names, error messages, and execution output are rendered as
+  text, never HTML. Assets use a restrictive Content Security Policy.
+- Activity contains no command argument values or command output; it records up
+  to 30 operations initiated in the current page. It is **not** server-wide
+  audit history, does not include other agents' REST/MCP calls, and is cleared
+  when switching credentials or reloading. Server audit logging is unchanged.
+- Execution requires an explicit confirmation on every submission; editing
+  parameters clears that confirmation. The form is locked while executing.
+  Changing credentials and closing the action dialog are disabled while awaiting an
+  execution response. A network timeout or error does not prove the command
+  failed; check the actual result before submitting again.
+
+The friendly layout uses the existing discovery document without adding any
+new administrative or execution APIs. Tool names and operation names come
+from your configuration, so use clear names for a more approachable experience.
+
+### Extending and checking dashboard translations
+
+The local dictionaries and locale names are in
+`src/clibroker/dashboard/i18n.js`. Add the same keys and interpolation fields
+to each dictionary when extending the interface. No translation service or
+frontend build is required. Both page and dialog language selectors use that
+locale list. The current UI supports `en` and `zh-CN`; it does not claim
+translations for other languages.
+
+The optional Node.js development check uses the built-in test runner:
+
+```bash
+node --test tests/dashboard_*.test.cjs
+```

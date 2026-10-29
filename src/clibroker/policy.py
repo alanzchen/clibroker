@@ -395,11 +395,13 @@ class PolicyEngine:
         allowed_flags = set(rule.flags.allowed) if rule.flags else set()
         standalone_flags = set(rule.flags.standalone) if rule.flags else set()
 
-        # Normalize: expand --flag=value into two elements
+        # Normalize options only: values after an explicit -- stay byte-for-byte
+        # positional arguments, even when they look like --flag=value.
         normalized: list[str] = []
-        for arg in remaining:
+        for index, arg in enumerate(remaining):
             if arg == "--":
-                normalized.append(arg)
+                normalized.extend(remaining[index:])
+                break
             elif arg.startswith("--") and "=" in arg:
                 flag_part, _, val_part = arg.partition("=")
                 if flag_part in standalone_flags:
@@ -467,7 +469,7 @@ class PolicyEngine:
 
             for pos_cfg, pos_val in zip(expected_positionals, positionals):
                 self._validate_positional_value(rule.id, pos_cfg, pos_val)
-            return flags + positionals
+            return flags + (["--"] if end_of_options else []) + positionals
 
         fixed_positionals = expected_positionals[:-1]
         min_positionals = len(fixed_positionals) + 1
@@ -487,7 +489,7 @@ class PolicyEngine:
         for pos_val in positionals[len(fixed_positionals) :]:
             self._validate_positional_value(rule.id, variadic_positional, pos_val)
 
-        return flags + positionals
+        return flags + (["--"] if end_of_options else []) + positionals
 
     def _validate_positional_value(
         self,
