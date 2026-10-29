@@ -434,7 +434,7 @@ async def test_direct_factory_executes_approval_pipeline(tmp_path):
                 },
             },
         )
-        assert denied.json()["result"]["structuredContent"]["ok"] is False
+        assert denied.json()["result"]["isError"] is True
     mcp = create_mcp_server(cfg, PolicyEngine(cfg), client_name="operator")
     app = mcp.streamable_http_app(
         streamable_http_path="/", stateless_http=True, json_response=True

@@ -191,6 +191,16 @@ def create_mcp_server(
     if execution_service.control:
         control = execution_service.control
         token = control.token(client_name)
+        if token is None:
+            raise ValueError(
+                "Control-enabled MCP servers require a configured client_name"
+            )
+        configured_rules = set(token.allow_rules)
+        allowed_rules = (
+            configured_rules
+            if allowed_rules is None
+            else configured_rules & set(allowed_rules)
+        )
 
         @mcp.tool()
         def clibroker_request_status(request_id: str) -> str:
