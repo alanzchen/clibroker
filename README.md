@@ -381,6 +381,23 @@ Notes:
 - policy denials and validation failures return `200` with `ok: false`
 - auth failures return `401` or `403`
 
+The server's `request_timeout_s` limits the wait for response headers. Before
+returning HTTP `504`, the server cancels the operation and waits for process
+cleanup; cleanup can extend beyond the deadline. The JSON response retains the
+`request_id` and reports `request_timed_out: true`. This is separate from
+`timed_out`, which describes the CLI tool's own execution timeout. If execution
+already finished, its recorded result is preserved. Otherwise `state` is
+`interrupted`: external side effects may already have happened. Do not
+automatically resubmit the command. With persistent control enabled, poll
+`GET /control/requests/<request_id>` for the saved outcome; without it the ID is
+only a correlation identifier. Streaming responses keep their lifecycle once
+headers have been sent.
+
+On POSIX, commands run in separate sessions. Timeouts, cancellation, and command
+completion terminate remaining children in the command's process group and
+reap the direct child. A descendant deliberately creating another session
+requires OS containment; process groups are not a sandbox.
+
 ### File Sharing
 
 Configured shares are available under authenticated `/files` URLs:
@@ -405,6 +422,13 @@ File sharing notes:
 - directory listings include `truncated` and `max_entries` fields when the listing cap is reached
 - generated file URLs are relative and do not contain secrets
 - read-write shares are writable through MCP file tools, not through the HTTP API
+- file contents are read through pinned descriptors; downloads do not reopen a
+  validated pathname. File mutations use descriptor-relative operations and
+  atomic publication/replacement, so a replacement symlink cannot redirect I/O
+- file I/O requires POSIX descriptor support. Atomic no-overwrite moves and
+  writes use Linux `renameat2` and fail closed if unavailable
+- downloads return the complete file with its captured size; HTTP Range
+  requests are not supported and `Accept-Ranges` is not advertised
 
 ### Client Discovery
 
@@ -580,6 +604,19 @@ injected arguments, and returns produced files in the `artifacts` field.
 clibroker-client execute --download-artifacts ./downloads himalaya -- attachment download 42
 ```
 
+Downloads never replace existing local files, directories, or symlinks. Name
+collisions receive suffixes such as `report.1.csv` and `report.2.csv`; the returned
+local path identifies each file, including recursive artifacts sharing a basename.
+
+The command's top-level `ok`, `exit_code`, output, and `request_id` describe
+execution. With `--download-artifacts`, `downloaded_artifacts` lists successful
+transfers and `artifact_downloads` contains a separate `ok` plus per-artifact
+`results` with `status`, `local_path` on success, or `error` on failure. A failed
+download does not erase the execution result or change its CLI exit status;
+check `artifact_downloads.ok` when transfers matter. Retry failed retrievals
+using `files get`, without executing the command again. Network/proxy timeouts
+can leave an unknown execution outcome and must not trigger automatic retries.
+
 You can also browse and download exposed shares directly:
 
 ```bash
@@ -589,8 +626,8 @@ clibroker-client files get himalaya attachments runs/<execution-id>/receipt.pdf 
 
 When a tool declares `argv_normalization`, the server advertises the accepted
 reorderable global argument patterns through `/client-config`, `tools`, and
-`tools --json`. The server remains the source of truth for normalization, while
-the client can reject obviously ambiguous forms such as duplicate global args.
+`tools --json`. The server is the source of truth for normalization and argument
+validation; the client forwards the supplied argv unchanged.
 
 Examples:
 
@@ -674,6 +711,17 @@ so `["events", "list", "--from", "2026-07-01"]` executes as
 `events list --from 2026-07-01` without trying to predeclare every flag. This
 mode is intentionally broad and cannot be combined with `flags` or
 `positionals`.
+
+Wildcard command segments do not match tokens starting with `-`. Unrecognized
+options before a configured descendant command are also rejected instead of
+falling back to a broad parent rule and hiding the descendant's policy.
+Declare supported global arguments explicitly through `argv_normalization`;
+literal option commands such as `command: ["--version"]` can still be allowed.
+
+Normalization honors `--` and declared flag values: neither is scanned for
+movable globals. Pass-through rules declare no flag arities, so after-command
+normalization stops at the first undeclared option and preserves the remaining
+tail. Place globals before that opaque tail or before the command.
 
 Example deny rule:
 

@@ -175,6 +175,9 @@ class ControlService:
             db.execute(
                 "DELETE FROM requests WHERE state NOT IN ('pending','running') AND id NOT IN (SELECT id FROM requests WHERE state NOT IN ('pending','running') ORDER BY created_at DESC LIMIT 1000)"
             )
+        from .execution import execution_started
+
+        execution_started(request_id)
         return request_id
 
     def finish(
@@ -194,7 +197,9 @@ class ControlService:
                 "UPDATE requests SET state=?,result=? WHERE id=?",
                 (state, json.dumps(stored), request_id),
             )
-        return result
+        from .execution import execution_finished
+
+        return execution_finished(result)
 
     def decode(self, row) -> dict:
         value = dict(row)
@@ -287,8 +292,9 @@ class ControlService:
         return await self.run(execution, request_id, tool, argv, client, allowed_rules)
 
     async def run(self, execution, request_id, tool, argv, client, allowed_rules):
-        from .execution import ExecutionForbidden, execution_error
+        from .execution import ExecutionForbidden, execution_error, execution_started
 
+        execution_started(request_id)
         try:
             result = await execution._execute(
                 tool, argv, client=client, allowed_rules=allowed_rules

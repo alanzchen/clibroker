@@ -6,7 +6,7 @@ import pytest
 
 import yaml
 
-from clibroker.config import Config
+from clibroker.config import Config, PositionalArg
 from clibroker.policy import (
     PolicyDenied,
     PolicyEngine,
@@ -185,6 +185,103 @@ class TestWildcardRules:
         with pytest.raises(ValueError, match="allow_any_args"):
             Config.model_validate(raw)
 
+    @pytest.mark.parametrize("prefix", [["-c", "foo.bar=baz"], ["--no-pager"], ["--"]])
+    def test_global_options_cannot_hide_a_denied_command(
+        self, prefix: list[str]
+    ) -> None:
+        config = Config.model_validate(
+            {
+                "tools": {
+                    "git": {
+                        "executable": "/usr/bin/git",
+                        "rules": [
+                            {"id": "all", "command": ["*"], "allow_any_args": True},
+                            {
+                                "id": "deny_config",
+                                "command": ["config"],
+                                "effect": "deny",
+                            },
+                        ],
+                    }
+                }
+            }
+        )
+        engine = PolicyEngine(config)
+        with pytest.raises(PolicyDenied):
+            engine.evaluate("git", ["config", "--get", "foo.bar"])
+        with pytest.raises(PolicyNoMatch):
+            engine.evaluate("git", prefix + ["config", "--get", "foo.bar"])
+
+    def test_nested_wildcard_cannot_consume_an_option(self) -> None:
+        config = Config.model_validate(
+            {
+                "tools": {
+                    "cli": {
+                        "executable": "/usr/bin/echo",
+                        "rules": [
+                            {
+                                "id": "all",
+                                "command": ["message", "*"],
+                                "allow_any_args": True,
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        with pytest.raises(PolicyNoMatch):
+            PolicyEngine(config).evaluate(
+                "cli", ["message", "--account", "work", "delete"]
+            )
+
+    def test_explicit_option_command_remains_supported(self) -> None:
+        config = Config.model_validate(
+            {
+                "tools": {
+                    "cli": {
+                        "executable": "/usr/bin/echo",
+                        "rules": [{"id": "version", "command": ["--version"]}],
+                    }
+                }
+            }
+        )
+        assert PolicyEngine(config).evaluate("cli", ["--version"]).rule_id == "version"
+
+    @pytest.mark.parametrize("parent", [["*"], ["remote"]])
+    def test_options_cannot_hide_a_denied_descendant_from_parent_passthrough(
+        self, parent: list[str]
+    ) -> None:
+        config = Config.model_validate(
+            {
+                "tools": {
+                    "git": {
+                        "executable": "/usr/bin/git",
+                        "rules": [
+                            {"id": "parent", "command": parent, "allow_any_args": True},
+                            {
+                                "id": "deny_get_url",
+                                "command": ["remote", "get-url"],
+                                "effect": "deny",
+                            },
+                            {
+                                "id": "leaf",
+                                "command": ["status"],
+                                "allow_any_args": True,
+                            },
+                            {"id": "help", "command": ["remote", "--help"]},
+                        ],
+                    }
+                }
+            }
+        )
+        engine = PolicyEngine(config)
+        with pytest.raises(PolicyNoMatch):
+            engine.evaluate("git", ["remote", "-v", "get-url", "origin"])
+        # Flags on an actual leaf and explicitly declared option commands
+        # retain their behavior; only ambiguous parent fallback is rejected.
+        assert engine.evaluate("git", ["status", "--short"]).rule_id == "leaf"
+        assert engine.evaluate("git", ["remote", "--help"]).rule_id == "help"
+
 
 class TestArgvNormalization:
     """Test tool-level argv normalization for reorderable globals."""
@@ -333,6 +430,111 @@ class TestArgvNormalization:
             "search",
             "query=thyroid",
         ]
+
+    @pytest.mark.parametrize("value", ["vault=Other", "vault=bad/value"])
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_separator_keeps_matching_global_text_literal(
+        self, value: str, raw: bool
+    ) -> None:
+        config = self._boundary_config(raw=raw)
+        if not raw:
+            config.tools["cli"].rules[0].positionals = [PositionalArg(name="literal")]
+        argv = ["search", "--", value]
+        result = PolicyEngine(config).evaluate("cli", argv)
+        assert result.normalized_argv == argv
+        assert result.full_argv == ["/usr/bin/echo"] + argv
+
+    @pytest.mark.parametrize(
+        "value", ["vault=Other", "vault=bad/value", "--unexpected=value"]
+    )
+    @pytest.mark.parametrize("inline", [False, True])
+    def test_flag_value_is_never_reclassified(self, value: str, inline: bool) -> None:
+        config = self._boundary_config()
+        argv = (
+            ["search", "--title=" + value] if inline else ["search", "--title", value]
+        )
+        result = PolicyEngine(config).evaluate("cli", argv)
+        assert result.normalized_argv == argv
+        assert result.full_argv == ["/usr/bin/echo", "search", "--title", value]
+
+    def test_standalone_flag_does_not_hide_an_actual_global(self) -> None:
+        config = self._boundary_config()
+        result = PolicyEngine(config).evaluate(
+            "cli", ["search", "--verbose", "vault=Main"]
+        )
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "vault=Main",
+            "search",
+            "--verbose",
+        ]
+
+    def test_raw_options_keep_unknown_value_boundaries_unchanged(self) -> None:
+        config = self._boundary_config(raw=True)
+        argv = ["search", "--title", "vault=bad/value"]
+        result = PolicyEngine(config).evaluate("cli", argv)
+        assert result.normalized_argv == argv
+        assert result.full_argv == ["/usr/bin/echo"] + argv
+
+    def test_normalization_uses_the_matching_sibling_rule_flag_arity(self) -> None:
+        config = self._boundary_config()
+        config.tools["cli"].rules.insert(
+            0,
+            config.tools["cli"]
+            .rules[0]
+            .model_copy(
+                update={
+                    "id": "sibling",
+                    "flags": None,
+                }
+            ),
+        )
+        result = PolicyEngine(config).evaluate(
+            "cli", ["search", "--title", "vault=bad/value"]
+        )
+        assert result.rule_id == "search"
+        assert result.full_argv == [
+            "/usr/bin/echo",
+            "search",
+            "--title",
+            "vault=bad/value",
+        ]
+
+    def test_configured_option_global_can_precede_a_wildcard_command(self) -> None:
+        config = self._boundary_config(raw=True)
+        config.tools["cli"].argv_normalization.patterns[0].key_pattern = "^--vault$"
+        config.tools["cli"].rules[0].command = ["*"]
+        result = PolicyEngine(config).evaluate("cli", ["--vault=Main", "search"])
+        assert result.full_argv == ["/usr/bin/echo", "--vault=Main", "search"]
+
+    @staticmethod
+    def _boundary_config(*, raw: bool = False) -> Config:
+        rule = {"id": "search", "command": ["search"], "allow_any_args": raw}
+        if not raw:
+            rule["flags"] = {"allowed": ["--title"], "standalone": ["--verbose"]}
+        return Config.model_validate(
+            {
+                "tools": {
+                    "cli": {
+                        "executable": "/usr/bin/echo",
+                        "argv_normalization": {
+                            "patterns": [
+                                {
+                                    "id": "vault",
+                                    "key_pattern": "^vault$",
+                                    "value_pattern": "^[A-Za-z]+$",
+                                    "allow_positions": [
+                                        "before_command",
+                                        "after_command",
+                                    ],
+                                }
+                            ]
+                        },
+                        "rules": [rule],
+                    }
+                }
+            }
+        )
 
 
 class TestDenyPrecedence:
@@ -549,4 +751,11 @@ class TestSiblingAllowRuleFallback:
             ["envelope", "list", "subject", "review", "order", "by", "date", "desc"],
         )
         assert result.rule_id == "list_envelopes"
-        assert result.full_argv[-6:] == ["subject", "review", "order", "by", "date", "desc"]
+        assert result.full_argv[-6:] == [
+            "subject",
+            "review",
+            "order",
+            "by",
+            "date",
+            "desc",
+        ]

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import re
 import sys
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
@@ -16,7 +15,7 @@ from . import (
     load_client_config,
     resolve_client_config_path,
 )
-from ..models import ClientGlobalArgPatternSchema, ClientToolSchema
+from ..models import ClientGlobalArgPatternSchema
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,9 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     files_parser = subparsers.add_parser(
         "files", help="List or download broker file shares"
     )
-    files_subparsers = files_parser.add_subparsers(
-        dest="files_command", required=True
-    )
+    files_subparsers = files_parser.add_subparsers(dest="files_command", required=True)
     files_list_parser = files_subparsers.add_parser(
         "list", help="List files in a share"
     )
@@ -175,18 +172,31 @@ async def _run(args: argparse.Namespace) -> int:
             forwarded_argv = forwarded_argv[1:]
 
         backend = await _resolve_backend_for_tool(config, args.tool, args.backend)
-        remote = await backend.fetch_config()
-        _validate_client_argv(args.tool, forwarded_argv, remote.tools)
         result = await backend.execute(args.tool, forwarded_argv)
         payload = result.model_dump()
         if args.download_artifacts:
-            downloaded = await _download_execute_artifacts(
+            transfers = await _download_execute_artifacts(
                 backend,
                 payload.get("artifacts", []),
                 Path(args.download_artifacts),
             )
-            payload["downloaded_artifacts"] = downloaded
+            payload["downloaded_artifacts"] = [
+                {**item, "path": item["local_path"]}
+                for item in transfers
+                if item["status"] == "downloaded"
+            ]
+            payload["artifact_downloads"] = {
+                "ok": all(item["status"] == "downloaded" for item in transfers),
+                "results": transfers,
+            }
         print(json.dumps(payload, indent=2))
+        if args.download_artifacts and not payload["artifact_downloads"]["ok"]:
+            print(
+                "Artifact downloads failed; execution outcome is unchanged. "
+                "Retry retrieval with files get <tool> <share> <path> --output <file> "
+                "using the failed entries in artifact_downloads.results.",
+                file=sys.stderr,
+            )
         if result.ok:
             return 0
         return result.exit_code if result.exit_code > 0 else 1
@@ -248,11 +258,7 @@ async def _resolve_backend_for_tool(config, tool_name: str, backend_name: str | 
 
     if not matching:
         available = sorted(
-            {
-                tool.name
-                for _name, _backend, remote in remotes
-                for tool in remote.tools
-            }
+            {tool.name for _name, _backend, remote in remotes for tool in remote.tools}
         )
         raise RuntimeError(
             f"Tool '{tool_name}' was not found in any configured backend. "
@@ -338,74 +344,6 @@ def _print_aggregated_tools(config, remotes) -> None:  # noqa: ANN001
         print(f"- {tool['name']} ({', '.join(tool['backends'])}){suffix}")
 
 
-def _validate_client_argv(
-    tool_name: str, argv: list[str], tools: list[ClientToolSchema]
-) -> None:
-    tool = next((tool for tool in tools if tool.name == tool_name), None)
-    if tool is None or tool.argv_normalization is None:
-        return
-
-    for pattern in tool.argv_normalization.patterns:
-        malformed = _find_malformed_global_args(argv, pattern)
-        if malformed:
-            raise RuntimeError(
-                f"Invalid global arg usage for tool '{tool_name}': "
-                f"{', '.join(malformed)} does not match the advertised pattern "
-                f"{pattern.key_pattern}={pattern.value_pattern or '.+'}."
-            )
-        duplicates = _find_duplicate_global_args(argv, pattern)
-        if duplicates:
-            canonical = (
-                f"{duplicates[0]} <command> ..."
-                if pattern.canonical_position == "before_command"
-                else f"<command> ... {duplicates[0]}"
-            )
-            raise RuntimeError(
-                f"Ambiguous global arg usage for tool '{tool_name}': "
-                f"{', '.join(duplicates)}. Canonical form starts with '{canonical}'."
-            )
-
-
-def _find_duplicate_global_args(
-    argv: list[str],
-    pattern: ClientGlobalArgPatternSchema,
-) -> list[str]:
-    if pattern.multiple:
-        return []
-
-    matches: list[str] = []
-    for arg in argv:
-        if "=" not in arg:
-            continue
-        key, _, value = arg.partition("=")
-        if not re.fullmatch(pattern.key_pattern, key):
-            continue
-        if pattern.value_pattern is not None and not re.fullmatch(
-            pattern.value_pattern, value
-        ):
-            continue
-        matches.append(arg)
-    return matches if len(matches) > 1 else []
-
-
-def _find_malformed_global_args(
-    argv: list[str],
-    pattern: ClientGlobalArgPatternSchema,
-) -> list[str]:
-    malformed: list[str] = []
-    for arg in argv:
-        if "=" not in arg:
-            continue
-        key, _, value = arg.partition("=")
-        if not re.fullmatch(pattern.key_pattern, key):
-            continue
-        if pattern.value_pattern is not None and not re.fullmatch(
-            pattern.value_pattern, value
-        ):
-            malformed.append(arg)
-    return malformed
-
-
 def _render_global_pattern(pattern: ClientGlobalArgPatternSchema) -> str:
     positions = "/".join(pattern.allow_positions)
     canonical = pattern.canonical_position
@@ -437,22 +375,23 @@ async def _download_execute_artifacts(
     artifacts: list[dict],
     output_dir: Path,
 ) -> list[dict]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    downloaded = []
+    transfers = []
     for artifact in artifacts:
-        safe_name = PurePosixPath(str(artifact["name"]).replace("\\", "/")).name
-        if not safe_name:
-            raise RuntimeError("Artifact name must include a file name")
-        destination = output_dir / safe_name
-        result = await backend.download_url(artifact["download_url"], destination)
-        downloaded.append(
-            {
-                **artifact,
-                "local_path": result["path"],
-                "path": result["path"],
-            }
-        )
-    return downloaded
+        try:
+            safe_name = PurePosixPath(str(artifact["name"]).replace("\\", "/")).name
+            if safe_name in ("", ".", "..") or Path(safe_name).name != safe_name:
+                raise ValueError("Artifact name must include a file name")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            result = await backend.download_url(
+                artifact["download_url"], output_dir / safe_name
+            )
+        except (ClientBackendError, OSError, ValueError) as exc:
+            transfers.append({**artifact, "status": "failed", "error": str(exc)})
+        else:
+            transfers.append(
+                {**artifact, "status": "downloaded", "local_path": result["path"]}
+            )
+    return transfers
 
 
 if __name__ == "__main__":

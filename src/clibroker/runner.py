@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 import time
 from dataclasses import dataclass
 
 logger = logging.getLogger("clibroker.runner")
+_CLEANUP_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -29,92 +32,111 @@ async def execute(
     timeout_s: float = 30.0,
     max_output_bytes: int = 1_048_576,
 ) -> RunResult:
-    """Execute a command directly (no shell) with hardened constraints.
+    """Execute directly, retaining bounded output and owning the process lifetime.
 
-    - Uses asyncio.create_subprocess_exec: each argv element is passed
-      directly to execvp, preventing shell metacharacter injection.
-    - Clears the environment unless explicit env dict is provided.
-    - Enforces a timeout; kills the process if exceeded.
-    - Caps stdout/stderr to max_output_bytes.
+    POSIX commands run in a separate session so timeout, cancellation, and normal
+    completion also terminate children in the command's process group. A command
+    deliberately starting another session requires an OS sandbox for containment.
     """
     t0 = time.monotonic()
     timed_out = False
-
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env if env is not None else {},  # empty env if None
-        cwd=cwd,
-    )
-
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            _communicate_capped(proc, max_output_bytes),
-            timeout=timeout_s,
+    stdout = bytearray()
+    stderr = bytearray()
+    communication = None
+    # Shield creation so cancellation cannot lose the handle between spawning a
+    # process and receiving its Process object. Cleanup also owns this task.
+    creation = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env if env is not None else {},
+            cwd=cwd,
+            start_new_session=os.name == "posix",
         )
-    except asyncio.TimeoutError:
-        timed_out = True
-        proc.kill()
-        # Drain whatever output is available
+    )
+    try:
+        proc = await asyncio.shield(creation)
+        communication = asyncio.create_task(
+            _communicate_capped(proc, max_output_bytes, stdout, stderr)
+        )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=5.0
-            )
-            stdout_bytes = stdout_bytes[:max_output_bytes]
-            stderr_bytes = stderr_bytes[:max_output_bytes]
+            # Keep the same bounded readers alive during timeout cleanup; using
+            # communicate() here would allocate unbounded output and lose prefixes.
+            await asyncio.wait_for(asyncio.shield(communication), timeout_s)
         except asyncio.TimeoutError:
-            stdout_bytes = b""
-            stderr_bytes = b"<process did not exit after kill>"
-        # Ensure the process is reaped
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
+            timed_out = True
+    finally:
+        cleanup = asyncio.create_task(_cleanup(creation, communication))
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     elapsed_ms = (time.monotonic() - t0) * 1000.0
-
     return RunResult(
         exit_code=proc.returncode if proc.returncode is not None else -1,
-        stdout=stdout_bytes.decode("utf-8", errors="replace"),
-        stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        stdout=stdout.decode("utf-8", errors="replace"),
+        stderr=stderr.decode("utf-8", errors="replace"),
         duration_ms=round(elapsed_ms, 2),
         timed_out=timed_out,
     )
 
 
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    try:
+        if os.name == "posix":
+            # The leader may have exited while children still hold its pipes.
+            os.killpg(proc.pid, signal.SIGKILL)
+        elif proc.returncode is None:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+async def _cleanup(creation, communication) -> None:
+    try:
+        proc = await creation
+    except Exception:
+        # Let execute propagate the original spawn error.
+        return
+    _kill_process_group(proc)
+    draining = communication or asyncio.create_task(proc.wait())
+    try:
+        await asyncio.wait_for(asyncio.shield(draining), _CLEANUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Subprocess pipes remained open after process-group cleanup")
+        # A descendant that deliberately escaped its session can retain the pipe.
+        # Process has no public close API; close its transport to release our FDs.
+        proc._transport.close()
+        draining.cancel()
+        await asyncio.gather(draining, return_exceptions=True)
+        try:
+            await asyncio.wait_for(proc.wait(), _CLEANUP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("Subprocess could not be reaped after cleanup")
+
+
 async def _communicate_capped(
     proc: asyncio.subprocess.Process,
     max_bytes: int,
-) -> tuple[bytes, bytes]:
-    """Read stdout and stderr concurrently, capping each at max_bytes."""
+    stdout: bytearray,
+    stderr: bytearray,
+) -> None:
+    """Drain both pipes continuously, retaining only each bounded prefix."""
 
-    async def _read_capped(stream: asyncio.StreamReader | None) -> bytes:
+    async def read(stream: asyncio.StreamReader | None, output: bytearray) -> None:
         if stream is None:
-            return b""
-        chunks: list[bytes] = []
-        total = 0
-        while total < max_bytes:
-            chunk = await stream.read(min(8192, max_bytes - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        # Drain remaining so the process doesn't block on a full pipe
-        if stream.at_eof() is False:
-            try:
-                while True:
-                    leftover = await stream.read(8192)
-                    if not leftover:
-                        break
-            except Exception:
-                logger.debug("Exception draining subprocess output", exc_info=True)
-        return b"".join(chunks)
+            return
+        while chunk := await stream.read(8192):
+            remaining = max_bytes - len(output)
+            if remaining > 0:
+                output.extend(chunk[:remaining])
 
-    stdout_bytes, stderr_bytes = await asyncio.gather(
-        _read_capped(proc.stdout),
-        _read_capped(proc.stderr),
-    )
-
+    await asyncio.gather(read(proc.stdout, stdout), read(proc.stderr, stderr))
     await proc.wait()
-    return stdout_bytes, stderr_bytes

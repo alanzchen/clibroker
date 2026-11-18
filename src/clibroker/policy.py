@@ -85,6 +85,16 @@ class _NormalizedArgv:
 
 
 @dataclass
+class _ParsedArguments:
+    """One interpretation of argv using a candidate rule's option arities."""
+
+    normalized: _NormalizedArgv
+    flags: list[str] = field(default_factory=list)
+    positionals: list[str] = field(default_factory=list)
+    end_of_options: bool = False
+
+
+@dataclass
 class _CommandPath:
     """A command-tree path that matched a prefix of argv."""
 
@@ -145,15 +155,7 @@ class PolicyEngine:
             raise PolicyNoMatch(tool, argv)
 
         # Remaining argv after command path
-        remaining = command_argv[match.consumed:]
-        normalized_after_command = self._normalize_after_command_args(
-            normalization, remaining
-        )
-        self._validate_global_arg_matches(
-            leading.matched_globals + normalized_after_command.matched_globals
-        )
-        remaining = normalized_after_command.command_argv
-
+        remaining = command_argv[match.consumed :]
         # Check deny rules on the matched node AND all ancestor nodes.
         # A deny on ["message", "delete"] cascades to deeper commands
         # like ["message", "delete", "batch"] so that adding a child
@@ -170,7 +172,13 @@ class PolicyEngine:
         for rule in match.node.rules:
             if rule.effect == "allow":
                 try:
-                    validated_argv = self._validate_rule(rule, remaining)
+                    parsed = self._parse_rule_arguments(rule, remaining, normalization)
+                    normalized_after_command = parsed.normalized
+                    self._validate_global_arg_matches(
+                        leading.matched_globals
+                        + normalized_after_command.matched_globals
+                    )
+                    validated_argv = self._validate_rule(rule, parsed)
                 except PolicyValidationError as exc:
                     last_validation_error = exc
                     continue
@@ -233,7 +241,10 @@ class PolicyEngine:
                     )
 
                 wildcard = path.node.children.get("*")
-                if wildcard is not None:
+                # Global options are not subcommands. Letting a wildcard consume
+                # one would hide the actual command from literal deny rules.
+                # Explicit literal option commands (e.g. --version) still work.
+                if wildcard is not None and not part.startswith("-"):
                     next_paths.append(
                         _CommandPath(
                             node=wildcard,
@@ -244,6 +255,11 @@ class PolicyEngine:
                     )
 
             if not next_paths:
+                if part.startswith("-") and any(path.node.children for path in active):
+                    # Options can separate a real CLI's subcommands. Falling
+                    # back to an earlier pass-through rule here would hide a
+                    # configured descendant (and its deny/RBAC checks).
+                    return None, matched_prefix_nodes
                 break
 
             matched_prefix_nodes.extend(path.node for path in next_paths)
@@ -287,34 +303,92 @@ class PolicyEngine:
             matched_globals=leading_matches,
         )
 
-    def _normalize_after_command_args(
+    def _parse_rule_arguments(
         self,
-        normalization: ArgvNormalizationConfig | None,
+        rule: Rule,
         argv: list[str],
-    ) -> "_NormalizedArgv":
-        """Normalize configured global args that appear after the command path."""
-        if normalization is None or not normalization.patterns:
-            return _NormalizedArgv(leading_global_args=[], command_argv=argv)
-
+        normalization: ArgvNormalizationConfig | None,
+    ) -> _ParsedArguments:
+        """Classify flags, their values and globals in a single boundary-aware pass."""
         matched_globals: list[_MatchedGlobalArg] = []
         filtered_argv: list[str] = []
-        for arg in argv:
-            match = self._match_global_arg(normalization, arg)
-            if match is None:
-                filtered_argv.append(arg)
-                continue
-            if "after_command" not in match.pattern.allow_positions:
-                raise PolicyValidationError(
-                    match.pattern.id,
-                    f"Global arg '{arg}' is not allowed after the command",
-                )
-            matched_globals.append(match)
-
-        return _NormalizedArgv(
-            leading_global_args=[match.arg for match in matched_globals],
-            command_argv=filtered_argv,
-            matched_globals=matched_globals,
+        parsed = _ParsedArguments(
+            normalized=_NormalizedArgv([], filtered_argv, matched_globals)
         )
+        allowed_flags = set(rule.flags.allowed) if rule.flags else set()
+        standalone_flags = set(rule.flags.standalone) if rule.flags else set()
+
+        index = 0
+        while index < len(argv):
+            arg = argv[index]
+            if arg == "--":
+                # Everything after the separator is data, including strings
+                # that look exactly like a configured global or an option.
+                filtered_argv.extend(argv[index:])
+                parsed.positionals.extend(argv[index + 1 :])
+                parsed.end_of_options = True
+                break
+
+            match = (
+                self._match_global_arg(normalization, arg) if normalization else None
+            )
+            if match is not None:
+                if "after_command" not in match.pattern.allow_positions:
+                    raise PolicyValidationError(
+                        match.pattern.id,
+                        f"Global arg '{arg}' is not allowed after the command",
+                    )
+                matched_globals.append(match)
+                index += 1
+                continue
+
+            if rule.allow_any_args:
+                if arg.startswith("-"):
+                    # A pass-through rule declares no flag arities. Preserve
+                    # the opaque tail instead of guessing which strings are
+                    # option values and promoting them to active globals.
+                    filtered_argv.extend(argv[index:])
+                    break
+                filtered_argv.append(arg)
+                index += 1
+                continue
+
+            if not arg.startswith("-"):
+                parsed.positionals.append(arg)
+                filtered_argv.append(arg)
+                index += 1
+                continue
+
+            flag, separator, inline_value = (
+                arg.partition("=") if arg.startswith("--") else (arg, "", "")
+            )
+            if flag in standalone_flags:
+                if separator:
+                    raise PolicyValidationError(
+                        rule.id, f"Standalone flag '{flag}' does not take a value"
+                    )
+                parsed.flags.append(flag)
+                filtered_argv.append(arg)
+                index += 1
+                continue
+            if flag not in allowed_flags:
+                raise PolicyValidationError(rule.id, f"Flag '{flag}' is not allowed")
+
+            if separator:
+                parsed.flags.extend([flag, inline_value])
+                filtered_argv.append(arg)
+                index += 1
+                continue
+            if index + 1 >= len(argv) or argv[index + 1] == "--":
+                raise PolicyValidationError(rule.id, f"Flag '{flag}' requires a value")
+            # Consume the original value atomically. Never inspect its text
+            # for global patterns or split its own --name=value spelling.
+            parsed.flags.extend([flag, argv[index + 1]])
+            filtered_argv.extend(argv[index : index + 2])
+            index += 2
+
+        parsed.normalized.leading_global_args = [match.arg for match in matched_globals]
+        return parsed
 
     def _match_global_arg(
         self,
@@ -372,85 +446,14 @@ class PolicyEngine:
             if prior is None:
                 seen_by_pattern[match.pattern.id] = match
 
-    def _validate_rule(self, rule: Rule, remaining: list[str]) -> list[str]:
-        """Validate remaining argv against a rule's flag/positional constraints.
-
-        Returns the validated argument list (flags + positionals in order).
-
-        Flag parsing rules:
-        - ``--`` marks end-of-options; everything after is a positional.
-        - ``--flag=value`` is split into ``--flag`` + ``value``.
-        - Every flag in ``flags.allowed`` consumes exactly one subsequent
-          argument as its value.
-        - Every flag in ``flags.standalone`` is a valueless boolean flag.
-        - Any argument starting with ``-`` that is not a recognized allowed
-          flag is rejected.
-        """
+    def _validate_rule(self, rule: Rule, parsed: _ParsedArguments) -> list[str]:
+        """Validate positional constraints after the shared argument parsing pass."""
         if rule.allow_any_args:
-            return remaining
+            return parsed.normalized.command_argv
 
-        flags: list[str] = []
-        positionals: list[str] = []
-
-        allowed_flags = set(rule.flags.allowed) if rule.flags else set()
-        standalone_flags = set(rule.flags.standalone) if rule.flags else set()
-
-        # Normalize options only: values after an explicit -- stay byte-for-byte
-        # positional arguments, even when they look like --flag=value.
-        normalized: list[str] = []
-        for index, arg in enumerate(remaining):
-            if arg == "--":
-                normalized.extend(remaining[index:])
-                break
-            elif arg.startswith("--") and "=" in arg:
-                flag_part, _, val_part = arg.partition("=")
-                if flag_part in standalone_flags:
-                    raise PolicyValidationError(
-                        rule.id,
-                        f"Standalone flag '{flag_part}' does not take a value",
-                    )
-                normalized.append(flag_part)
-                normalized.append(val_part)
-            else:
-                normalized.append(arg)
-
-        i = 0
-        end_of_options = False
-        while i < len(normalized):
-            arg = normalized[i]
-
-            if end_of_options:
-                positionals.append(arg)
-                i += 1
-                continue
-
-            if arg == "--":
-                end_of_options = True
-                i += 1
-                continue
-
-            if arg.startswith("-"):
-                # It's a flag
-                if arg in standalone_flags:
-                    flags.append(arg)
-                    i += 1
-                    continue
-
-                if arg not in allowed_flags:
-                    raise PolicyValidationError(rule.id, f"Flag '{arg}' is not allowed")
-                flags.append(arg)
-                # Every flag must have a value argument following it
-                if i + 1 >= len(normalized) or normalized[i + 1] == "--":
-                    raise PolicyValidationError(
-                        rule.id,
-                        f"Flag '{arg}' requires a value",
-                    )
-                i += 1
-                flags.append(normalized[i])
-            else:
-                positionals.append(arg)
-
-            i += 1
+        flags = parsed.flags
+        positionals = parsed.positionals
+        end_of_options = parsed.end_of_options
 
         expected_positionals = rule.positionals
 
