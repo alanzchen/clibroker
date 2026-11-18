@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ctypes
 import errno
 import hashlib
 import logging
 import os
 import shutil
 import stat
+import sys
+import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from urllib.parse import quote
 
 from .config import Config
@@ -88,7 +92,7 @@ class FileShareService:
                 tool_shares["working_dir"] = ResolvedFileShare(
                     tool_name=tool_name,
                     name="working_dir",
-                    root=Path(tool_cfg.working_dir),
+                    root=Path(tool_cfg.working_dir).resolve(strict=False),
                     access="read",
                     max_file_bytes=sharing_cfg.max_file_bytes,
                     max_inline_read_bytes=sharing_cfg.max_inline_read_bytes,
@@ -98,7 +102,7 @@ class FileShareService:
                 tool_shares[share.name] = ResolvedFileShare(
                     tool_name=tool_name,
                     name=share.name,
-                    root=Path(share.path),
+                    root=Path(share.path).resolve(strict=False),
                     access=share.access,
                     max_file_bytes=sharing_cfg.max_file_bytes,
                     max_inline_read_bytes=sharing_cfg.max_inline_read_bytes,
@@ -181,7 +185,7 @@ class FileShareService:
 
         entries = []
         truncated = False
-        for entry in self._iter_entries(resolved, recursive=recursive):
+        for entry in self._iter_entries(root, resolved, recursive=recursive):
             if len(entries) >= _MAX_LIST_ENTRIES:
                 truncated = True
                 break
@@ -212,21 +216,23 @@ class FileShareService:
             "path": rel_path,
         }
 
-    def local_path_for_read(
+    def open_for_download(
         self,
         share: ResolvedFileShare,
         path: str = ".",
-    ) -> tuple[Path, str]:
-        """Return a safe local path for authenticated HTTP read/download."""
-
-        _, _, resolved, rel_path = self._existing_path(share, path)
-        if resolved.is_file() and _exceeds_file_limit(
-            resolved.stat().st_size, share.max_file_bytes
-        ):
-            raise FileShareTooLarge(
-                f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
-            )
-        return resolved, rel_path
+    ) -> tuple[BinaryIO | None, str, os.stat_result]:
+        """Open and validate the actual object; callers must close returned files."""
+        root, _, resolved, rel_path = self._existing_path(share, path)
+        with self._open_contained_path(root, resolved, rel_path) as (fd, snapshot):
+            if stat.S_ISDIR(snapshot.st_mode):
+                return None, rel_path, snapshot
+            if not stat.S_ISREG(snapshot.st_mode):
+                raise FileShareError(f"Path '{rel_path}' is not a file or directory")
+            if _exceeds_file_limit(snapshot.st_size, share.max_file_bytes):
+                raise FileShareTooLarge(
+                    f"File '{rel_path}' exceeds max_file_bytes ({share.max_file_bytes})"
+                )
+            return os.fdopen(os.dup(fd), "rb"), rel_path, snapshot
 
     def prepare_artifact_dir(
         self,
@@ -241,20 +247,14 @@ class FileShareService:
             raise FileShareError("Artifact directory must not be the share root")
 
         candidate = root.joinpath(*parts)
-        self._checked_nearest_existing_parent(candidate, root)
-        try:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            candidate.mkdir(parents=False, exist_ok=False)
-        except FileExistsError as exc:
-            raise FileShareConflict(
-                f"Artifact directory '{rel_path}' already exists"
-            ) from exc
-        except OSError as exc:
-            self._raise_os_error("create artifact directory", rel_path, exc)
-
-        resolved = self._checked_resolve(candidate, root)
-        if not resolved.is_dir():
-            raise FileShareConflict(f"Artifact path '{rel_path}' is not a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _is_relative_to(resolved, root):
+            raise FileShareForbidden("Path escapes the file share root")
+        if resolved == root:
+            raise FileShareError("Artifact directory must not be the share root")
+        with self._directory_fd(root, resolved.parent, create=True) as parent_fd:
+            with self._os_errors("create artifact directory", rel_path):
+                os.mkdir(resolved.name, dir_fd=parent_fd)
         return resolved, rel_path
 
     def artifact_metadata(
@@ -271,16 +271,36 @@ class FileShareService:
             raise FileShareError("Artifact path is not a directory")
 
         artifacts: list[dict[str, Any]] = []
-        for entry in self._iter_entries(resolved, recursive=recursive):
-            if not entry.is_file():
+        for entry in self._iter_entries(root, resolved, recursive=recursive):
+            canonical = self._checked_resolve(entry, root)
+            metadata = self._metadata(share, root, entry, resolved=canonical)
+            if metadata["type"] != "file":
                 continue
-            metadata = self._metadata(share, root, entry)
-            if metadata["size"] is None or _exceeds_file_limit(
-                metadata["size"], share.max_file_bytes
+            with self._open_regular_file(root, canonical, metadata["path"]) as (
+                stream,
+                snapshot,
             ):
-                continue
-            metadata["sha256"] = _sha256_file(entry)
-            artifacts.append(metadata)
+                if _exceeds_file_limit(snapshot.st_size, share.max_file_bytes):
+                    continue
+                digest = hashlib.sha256()
+                remaining = snapshot.st_size
+                while remaining:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise FileShareConflict(
+                            "Artifact changed while being collected"
+                        )
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                current = os.fstat(stream.fileno())
+                if (current.st_size, current.st_mtime_ns) != (
+                    snapshot.st_size,
+                    snapshot.st_mtime_ns,
+                ):
+                    raise FileShareConflict("Artifact changed while being collected")
+                metadata = self._metadata_from_stat(share, metadata["path"], snapshot)
+                metadata["sha256"] = digest.hexdigest()
+                artifacts.append(metadata)
 
         artifacts.sort(key=lambda item: item["path"])
         return artifacts
@@ -329,61 +349,19 @@ class FileShareService:
         resolved: Path,
         rel_path: str,
     ) -> bytes:
-        """Pin each canonical path component before reading a regular file.
-
-        Resolving first permits symlinks whose targets stay inside the share.
-        Descriptor-relative, no-follow opens then reject a replacement symlink
-        anywhere in that canonical path, including ancestors of the share root.
-        """
-        if os.name != "posix" or not all(
-            hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")
-        ):
-            raise FileShareError("Safe file reads require POSIX descriptor support")
-
-        relative_parts = resolved.relative_to(root).parts
-        if not relative_parts:
-            raise FileShareError(f"Path '{rel_path}' is not a file")
+        """Use the same pinned descriptor boundary as downloads and hashing."""
         read_limit, limit_name = _inline_read_limit(share)
-        directory_flags = (
-            getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
-        )
-        file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-        directory_fd = None
-        file_fd = None
-        try:
-            directory_fd = os.open(root.anchor, directory_flags)
-            for part in (*root.parts[1:], *relative_parts[:-1]):
-                child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
-                os.close(directory_fd)
-                directory_fd = child_fd
-            file_fd = os.open(relative_parts[-1], file_flags, dir_fd=directory_fd)
-            file_stat = os.fstat(file_fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise FileShareError(f"Path '{rel_path}' is not a file")
-            if file_stat.st_size > read_limit:
+        with self._open_regular_file(root, resolved, rel_path) as (stream, snapshot):
+            if snapshot.st_size > read_limit:
                 raise FileShareTooLarge(
                     f"File '{rel_path}' exceeds {limit_name} ({read_limit})"
                 )
-            with os.fdopen(file_fd, "rb") as stream:
-                file_fd = None  # The stream owns this descriptor now.
-                # The same open file can still grow after fstat.
-                data = stream.read(read_limit + 1)
-            if len(data) > read_limit:
-                raise FileShareTooLarge(
-                    f"File '{rel_path}' exceeds {limit_name} ({read_limit})"
-                )
-            return data
-        except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                raise FileShareForbidden("Path changed or contains a symlink") from exc
-            if exc.errno == errno.ENOENT:
-                raise FileShareNotFound(f"Path '{rel_path}' was not found") from exc
-            self._raise_os_error("read", rel_path, exc)
-        finally:
-            if file_fd is not None:
-                os.close(file_fd)
-            if directory_fd is not None:
-                os.close(directory_fd)
+            data = stream.read(read_limit + 1)
+        if len(data) > read_limit:
+            raise FileShareTooLarge(
+                f"File '{rel_path}' exceeds {limit_name} ({read_limit})"
+            )
+        return data
 
     def write_file(
         self,
@@ -400,32 +378,62 @@ class FileShareService:
             raise FileShareTooLarge(
                 f"Write exceeds max_file_bytes ({share.max_file_bytes})"
             )
-
         root, candidate, rel_path = self._destination_path(share, path)
         if rel_path == ".":
             raise FileShareError("Cannot write to the share root")
 
+        # Preserve supported in-share symlinks, but never reopen a checked
+        # pathname. Only the canonical parent descriptor reaches the OS call.
         if candidate.exists() or candidate.is_symlink():
             if not overwrite:
                 raise FileShareConflict(f"Path '{rel_path}' already exists")
-            try:
-                resolved = self._checked_resolve(candidate, root)
-            except FileNotFoundError as exc:
-                raise FileShareNotFound(f"Path '{rel_path}' was not found") from exc
-            if resolved.is_dir():
+            target = self._checked_resolve(candidate, root)
+            if target.is_dir():
                 raise FileShareConflict(f"Path '{rel_path}' is a directory")
         else:
-            self._checked_existing_dir(candidate.parent, root)
+            target = self._checked_existing_dir(candidate.parent, root) / candidate.name
 
-        try:
-            candidate.write_bytes(data)
-        except OSError as exc:
-            self._raise_os_error("write", rel_path, exc)
+        with self._directory_fd(root, target.parent) as parent_fd:
+            temporary = f".clibroker-{uuid.uuid4().hex}.tmp"
+            with self._os_errors("write", rel_path):
+                try:
+                    existing = os.stat(
+                        target.name, dir_fd=parent_fd, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    existing = None
+                fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o666,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        if existing is not None and stat.S_ISREG(existing.st_mode):
+                            os.fchmod(stream.fileno(), stat.S_IMODE(existing.st_mode))
+                        stream.write(data)
+                        stream.flush()
+                        snapshot = os.fstat(stream.fileno())
+                    if overwrite:
+                        os.replace(
+                            temporary,
+                            target.name,
+                            src_dir_fd=parent_fd,
+                            dst_dir_fd=parent_fd,
+                        )
+                    else:
+                        _rename_noreplace(parent_fd, temporary, parent_fd, target.name)
+                finally:
+                    try:
+                        os.unlink(temporary, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
         return {
             "ok": True,
             "tool": share.tool_name,
             "share": share.name,
-            "entry": self._metadata(share, root, candidate),
+            "entry": self._metadata_from_stat(share, rel_path, snapshot),
         }
 
     def mkdir(
@@ -437,31 +445,32 @@ class FileShareService:
     ) -> dict[str, Any]:
         self._require_write(share)
         root, candidate, rel_path = self._destination_path(share, path)
-
-        if rel_path == ".":
-            return {
-                "ok": True,
-                "tool": share.tool_name,
-                "share": share.name,
-                "entry": self._metadata(share, root, root),
-            }
-
-        if candidate.exists() and not candidate.is_dir():
-            raise FileShareConflict(f"Path '{rel_path}' already exists and is not a directory")
-
+        target = candidate.resolve(strict=False)
+        if not _is_relative_to(target, root):
+            raise FileShareForbidden("Path escapes the file share root")
         if parents:
-            self._checked_nearest_existing_parent(candidate, root)
+            with self._directory_fd(root, target, create=True) as fd:
+                snapshot = os.fstat(fd)
+        elif target == root:
+            with self._directory_fd(root, root) as fd:
+                snapshot = os.fstat(fd)
         else:
-            self._checked_existing_dir(candidate.parent, root)
-        try:
-            candidate.mkdir(parents=parents, exist_ok=True)
-        except OSError as exc:
-            self._raise_os_error("create directory", rel_path, exc)
+            with self._directory_fd(root, target.parent) as parent_fd:
+                with self._os_errors("create directory", rel_path):
+                    try:
+                        os.mkdir(target.name, dir_fd=parent_fd)
+                    except FileExistsError:
+                        pass
+                    fd = os.open(target.name, _directory_flags(), dir_fd=parent_fd)
+                    try:
+                        snapshot = os.fstat(fd)
+                    finally:
+                        os.close(fd)
         return {
             "ok": True,
             "tool": share.tool_name,
             "share": share.name,
-            "entry": self._metadata(share, root, candidate),
+            "entry": self._metadata_from_stat(share, rel_path, snapshot),
         }
 
     def move(
@@ -473,62 +482,49 @@ class FileShareService:
         overwrite: bool = False,
     ) -> dict[str, Any]:
         self._require_write(share)
-        root, source_candidate, source_resolved, source_rel = self._existing_path(
-            share, source_path
-        )
-        if source_rel == ".":
-            raise FileShareError("Cannot move the share root")
-
-        _, destination_candidate, destination_rel = self._destination_path(
+        root, source, _, source_rel = self._existing_path(share, source_path)
+        _, destination, destination_rel = self._destination_path(
             share, destination_path
         )
-        if destination_rel == ".":
-            raise FileShareError("Cannot move to the share root")
-
-        if destination_candidate.exists() or destination_candidate.is_symlink():
-            try:
-                destination_resolved = self._checked_resolve(
-                    destination_candidate,
-                    root,
-                )
-            except FileNotFoundError as exc:
-                raise FileShareNotFound(
-                    f"Path '{destination_rel}' was not found"
-                ) from exc
-            if not overwrite:
-                raise FileShareConflict(f"Path '{destination_rel}' already exists")
-            if destination_resolved.is_dir():
-                raise FileShareConflict(
-                    f"Destination '{destination_rel}' is a directory"
-                )
-            destination_candidate.unlink()
-        else:
-            self._checked_existing_dir(destination_candidate.parent, root)
-
-        try:
-            source_candidate.replace(destination_candidate)
-        except OSError as exc:
-            logger.warning(
-                "file_share_os_error",
-                exc_info=True,
-                extra={
-                    "action": "move",
-                    "source_path": source_rel,
-                    "destination_path": destination_rel,
-                    "errno": exc.errno,
-                },
-            )
-            suffix = f" (errno {exc.errno})" if exc.errno is not None else ""
-            raise FileShareError(
-                f"Failed to move '{source_rel}' to '{destination_rel}'{suffix}"
-            ) from exc
+        if source_rel == "." or destination_rel == ".":
+            raise FileShareError("Cannot move the share root or move to it")
+        source_parent = self._checked_existing_dir(source.parent, root)
+        destination_parent = self._checked_existing_dir(destination.parent, root)
+        # An existing destination symlink outside the share remains forbidden.
+        if destination.exists() or destination.is_symlink():
+            self._checked_resolve(destination, root)
+        with self._directory_fd(root, source_parent) as source_fd:
+            with self._directory_fd(root, destination_parent) as destination_fd:
+                with self._os_errors("move", source_rel):
+                    if (
+                        source_parent == destination_parent
+                        and source.name == destination.name
+                    ):
+                        if not overwrite:
+                            raise FileShareConflict(
+                                f"Path '{destination_rel}' already exists"
+                            )
+                    elif overwrite:
+                        os.replace(
+                            source.name,
+                            destination.name,
+                            src_dir_fd=source_fd,
+                            dst_dir_fd=destination_fd,
+                        )
+                    else:
+                        _rename_noreplace(
+                            source_fd, source.name, destination_fd, destination.name
+                        )
+                    snapshot = os.stat(
+                        destination.name, dir_fd=destination_fd, follow_symlinks=False
+                    )
         return {
             "ok": True,
             "tool": share.tool_name,
             "share": share.name,
             "source_path": source_rel,
             "destination_path": destination_rel,
-            "entry": self._metadata(share, root, destination_candidate),
+            "entry": self._metadata_from_stat(share, destination_rel, snapshot),
         }
 
     def delete(
@@ -539,31 +535,26 @@ class FileShareService:
         recursive: bool = False,
     ) -> dict[str, Any]:
         self._require_write(share)
-        root, candidate, resolved, rel_path = self._existing_path(share, path)
+        root, candidate, _, rel_path = self._existing_path(share, path)
         if rel_path == ".":
             raise FileShareError("Cannot delete the share root")
-
-        if candidate.is_symlink() or resolved.is_file():
-            try:
-                candidate.unlink()
-            except OSError as exc:
-                self._raise_os_error("delete", rel_path, exc)
-        elif resolved.is_dir():
-            try:
-                if recursive:
-                    shutil.rmtree(candidate)
-                else:
-                    candidate.rmdir()
-            except OSError as exc:
-                self._raise_os_error(
-                    "delete directory",
-                    rel_path,
-                    exc,
-                    FileShareConflict,
+        parent = self._checked_existing_dir(candidate.parent, root)
+        with self._directory_fd(root, parent) as parent_fd:
+            with self._os_errors("delete", rel_path):
+                snapshot = os.stat(
+                    candidate.name, dir_fd=parent_fd, follow_symlinks=False
                 )
-        else:
-            raise FileShareError(f"Path '{rel_path}' is not a file or directory")
-
+                if stat.S_ISDIR(snapshot.st_mode):
+                    if recursive:
+                        if not shutil.rmtree.avoids_symlink_attacks:
+                            raise FileShareError(
+                                "Safe recursive deletes require descriptor support"
+                            )
+                        shutil.rmtree(candidate.name, dir_fd=parent_fd)
+                    else:
+                        os.rmdir(candidate.name, dir_fd=parent_fd)
+                else:
+                    os.unlink(candidate.name, dir_fd=parent_fd)
         return {
             "ok": True,
             "tool": share.tool_name,
@@ -571,6 +562,76 @@ class FileShareService:
             "deleted": rel_path,
             "recursive": recursive,
         }
+
+    @contextmanager
+    def _os_errors(self, action: str, rel_path: str):
+        try:
+            yield
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise FileShareForbidden("Path changed or contains a symlink") from exc
+            if exc.errno == errno.ENOENT:
+                raise FileShareNotFound(f"Path '{rel_path}' was not found") from exc
+            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR):
+                raise FileShareConflict(
+                    f"Path '{rel_path}' conflicts with an existing entry"
+                ) from exc
+            self._raise_os_error(action, rel_path, exc)
+
+    @contextmanager
+    def _directory_fd(self, root: Path, directory: Path, *, create: bool = False):
+        """Pin canonical ancestors and operate relative to them, never by path again."""
+        if os.name != "posix" or not all(
+            hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")
+        ):
+            raise FileShareError(
+                "Safe file operations require POSIX descriptor support"
+            )
+        relative = directory.relative_to(root).parts
+        fd = None
+        with self._os_errors("open directory", "."):
+            try:
+                fd = os.open(root.anchor, _directory_flags())
+                for part in root.parts[1:]:
+                    child_fd = os.open(part, _directory_flags(), dir_fd=fd)
+                    os.close(fd)
+                    fd = child_fd
+                for part in relative:
+                    if create:
+                        try:
+                            os.mkdir(part, dir_fd=fd)
+                        except FileExistsError:
+                            pass
+                    child_fd = os.open(part, _directory_flags(), dir_fd=fd)
+                    os.close(fd)
+                    fd = child_fd
+                yield fd
+            finally:
+                if fd is not None:
+                    os.close(fd)
+
+    @contextmanager
+    def _open_contained_path(self, root: Path, resolved: Path, rel_path: str):
+        parent = resolved.parent if resolved != root else root
+        with self._directory_fd(root, parent) as parent_fd:
+            with self._os_errors("read", rel_path):
+                fd = os.open(
+                    resolved.name if resolved != root else ".",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    yield fd, os.fstat(fd)
+                finally:
+                    os.close(fd)
+
+    @contextmanager
+    def _open_regular_file(self, root: Path, resolved: Path, rel_path: str):
+        with self._open_contained_path(root, resolved, rel_path) as (fd, snapshot):
+            if not stat.S_ISREG(snapshot.st_mode):
+                raise FileShareError(f"Path '{rel_path}' is not a file")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                yield stream, snapshot
 
     def _require_write(self, share: ResolvedFileShare) -> None:
         if share.access != "read_write":
@@ -600,14 +661,17 @@ class FileShareService:
         return root, root.joinpath(*parts), rel_path
 
     def _resolved_root(self, share: ResolvedFileShare) -> Path:
-        try:
-            root = share.root.resolve(strict=True)
-        except FileNotFoundError as exc:
-            raise FileShareNotFound(
-                f"File share root for '{share.name}' was not found"
-            ) from exc
+        # Resolve configured symlinks once at service construction. A later
+        # replacement must not redefine which host directory is authorized.
+        root = share.root
+        if not root.exists():
+            raise FileShareNotFound(f"File share root for '{share.name}' was not found")
+        if root.is_symlink():
+            raise FileShareForbidden("File share root changed to a symlink")
         if not root.is_dir():
-            raise FileShareError(f"File share root for '{share.name}' is not a directory")
+            raise FileShareError(
+                f"File share root for '{share.name}' is not a directory"
+            )
         return root
 
     def _checked_resolve(self, path: Path, root: Path) -> Path:
@@ -620,44 +684,37 @@ class FileShareService:
         try:
             resolved = self._checked_resolve(path, root)
         except FileNotFoundError as exc:
-            raise FileShareNotFound(f"Parent directory '{path.name}' was not found") from exc
+            raise FileShareNotFound(
+                f"Parent directory '{path.name}' was not found"
+            ) from exc
         if not resolved.is_dir():
             raise FileShareConflict(f"Parent path '{path.name}' is not a directory")
         return resolved
 
-    def _checked_nearest_existing_parent(self, path: Path, root: Path) -> Path:
-        current = path.parent
-        while not current.exists() and current != root:
-            current = current.parent
-        return self._checked_existing_dir(current, root)
-
-    def _iter_entries(self, root: Path, *, recursive: bool) -> Iterator[Path]:
-        stack = [root]
+    def _iter_entries(
+        self, root: Path, directory: Path, *, recursive: bool
+    ) -> Iterator[Path]:
+        stack = [directory]
         while stack:
             current = stack.pop()
             try:
-                children = sorted(current.iterdir(), key=lambda item: item.name)
-            except OSError:
-                logger.warning(
-                    "file_share_list_failed",
-                    exc_info=True,
-                    extra={"path": str(current)},
-                )
-                continue
-
-            for child in children:
-                yield child
-                try:
-                    descend = recursive and child.is_dir() and not child.is_symlink()
-                except OSError:
-                    logger.warning(
-                        "file_share_list_stat_failed",
-                        exc_info=True,
-                        extra={"path": str(child)},
+                with self._directory_fd(root, current) as fd:
+                    listing_fd = os.open(
+                        ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
                     )
-                    descend = False
-                if descend:
-                    stack.append(child)
+                    try:
+                        children = sorted(os.listdir(listing_fd))
+                    finally:
+                        os.close(listing_fd)
+                    for name in children:
+                        child = current / name
+                        yield child
+                        snapshot = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if recursive and stat.S_ISDIR(snapshot.st_mode):
+                            stack.append(child)
+            except (OSError, FileShareError):
+                logger.warning("file_share_list_failed", exc_info=True)
+                continue
             if not recursive:
                 break
 
@@ -669,26 +726,34 @@ class FileShareService:
         *,
         resolved: Path | None = None,
     ) -> dict[str, Any]:
-        resolved_path = resolved or self._checked_resolve(path, root)
+        canonical = resolved or self._checked_resolve(path, root)
         rel_path = "." if path == root else path.relative_to(root).as_posix()
-        stat = resolved_path.stat()
+        with self._directory_fd(
+            root, canonical.parent if canonical != root else root
+        ) as fd:
+            with self._os_errors("stat", rel_path):
+                snapshot = os.stat(
+                    canonical.name if canonical != root else ".",
+                    dir_fd=fd,
+                    follow_symlinks=False,
+                )
+        return self._metadata_from_stat(share, rel_path, snapshot)
 
-        if resolved_path.is_dir():
-            kind = "directory"
-            size: int | None = None
-        elif resolved_path.is_file():
-            kind = "file"
-            size = stat.st_size
+    def _metadata_from_stat(
+        self, share: ResolvedFileShare, rel_path: str, snapshot: os.stat_result
+    ) -> dict[str, Any]:
+        if stat.S_ISDIR(snapshot.st_mode):
+            kind, size = "directory", None
+        elif stat.S_ISREG(snapshot.st_mode):
+            kind, size = "file", snapshot.st_size
         else:
-            kind = "other"
-            size = None
-
+            kind, size = "other", None
         payload: dict[str, Any] = {
             "name": "." if rel_path == "." else PurePosixPath(rel_path).name,
             "path": rel_path,
             "type": kind,
             "size": size,
-            "modified": stat.st_mtime,
+            "modified": snapshot.st_mtime,
             "url": self.url_for(share.tool_name, share.name, rel_path),
         }
         if kind == "file":
@@ -745,12 +810,42 @@ def _normalize_client_path(path: str) -> tuple[tuple[str, ...], str]:
     return tuple(parts), rel_path
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _directory_flags() -> int:
+    return getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _rename_noreplace(
+    source_fd: int, source: str, destination_fd: int, destination: str
+) -> None:
+    """Use the OS's atomic no-replace primitive, including for directories.
+
+    There is no race-free exists()+rename fallback. Unsupported hosts fail
+    closed instead of silently overwriting a concurrently created target.
+    """
+    if not sys.platform.startswith("linux"):
+        raise FileShareError(
+            "Atomic no-overwrite moves require Linux renameat2 support"
+        )
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(libc, "renameat2", None)
+    if rename is None:
+        raise FileShareError("Atomic no-overwrite moves require renameat2 support")
+    rename.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename.restype = ctypes.c_int
+    if (
+        rename(
+            source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), 1
+        )
+        != 0
+    ):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def _exceeds_file_limit(size: int, max_file_bytes: int) -> bool:

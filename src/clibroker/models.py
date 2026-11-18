@@ -47,6 +47,7 @@ class ExecuteResponse(BaseModel):
     duration_ms: float
     matched_rule: str
     timed_out: bool = False
+    request_timed_out: bool = False
     artifacts: list[ExecuteArtifactSchema] = Field(default_factory=list)
 
 

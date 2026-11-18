@@ -42,6 +42,9 @@
 server:
   bind: "127.0.0.1:8080"
   request_timeout_s: 30.0
+  # Pre-response deadline: cancel work and await process cleanup before 504.
+  # The response preserves request_id and sets request_timed_out; an interrupted
+  # external outcome may be unknown. Do not automatically retry execution.
   max_output_bytes: 1048576
   # Optional persistent owner controls. Add an owner token before enabling.
   # control:
@@ -170,6 +173,8 @@ tools:
     rules:
       - id: agentcal_all
         command: ["*"]
+        # Wildcards exclude option tokens. Configure accepted globals explicitly;
+        # unrecognized leading options must not hide a denied command.
         effect: allow
         allow_any_args: true
 

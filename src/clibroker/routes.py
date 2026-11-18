@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from typing import BinaryIO
 
 from fastapi import APIRouter, HTTPException, Request
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, StreamingResponse
 
 from . import __version__
 from .auth import AuthenticatedClient, Authenticator
@@ -22,8 +24,57 @@ from .models import (
     ExecuteRequest,
     ExecuteResponse,
 )
+from .thread_work import run_owned_thread
 
 router = APIRouter()
+
+
+class _OpenFileResponse(StreamingResponse):
+    """Stream the validated descriptor, and close it even on disconnect."""
+
+    def __init__(self, stream: BinaryIO, path: str, snapshot: os.stat_result):
+        self.stream = stream
+
+        def chunks():
+            remaining = snapshot.st_size
+            while remaining:
+                chunk = stream.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+        # Let Starlette supply the standard MIME/stat headers without opening
+        # the pathname a second time. Content reads use only the pinned fd.
+        headers = dict(FileResponse(path, stat_result=snapshot).headers)
+        headers.pop("accept-ranges", None)
+        super().__init__(chunks(), headers=headers)
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.stream.close()
+
+
+async def _open_download(file_shares, share_cfg, path):
+    """Keep ownership until an opened file reaches the response or is closed."""
+    opened_stream = None
+
+    def open_file():
+        nonlocal opened_stream
+        result = file_shares.open_for_download(share_cfg, path)
+        opened_stream = result[0]
+        return result
+
+    try:
+        return await run_owned_thread(open_file)
+    except BaseException:
+        # The owned worker has completed even when cancellation arrived during
+        # its open. No eventual result can escape this cleanup path.
+        if opened_stream is not None:
+            opened_stream.close()
+        raise
 
 
 def _token_slug(value: str) -> str:
@@ -145,7 +196,7 @@ async def get_client_config(request: Request) -> ClientConfigResponse:
 
 @router.get("/files/{tool}/{share}")
 @router.get("/files/{tool}/{share}/{path:path}")
-def get_shared_file(
+async def get_shared_file(
     tool: str,
     share: str,
     request: Request,
@@ -159,13 +210,17 @@ def get_shared_file(
 
     if request.app.state.control:
         request.app.state.control.ensure_active(client.name)
+    stream = None
     try:
         share_cfg = file_shares.get_share(tool, share, client.allow_rules)
-        local_path, _ = file_shares.local_path_for_read(share_cfg, path)
-        if local_path.is_dir():
-            return file_shares.list_dir(share_cfg, path)
-        if not local_path.is_file():
-            raise FileShareError("Path is not a file or directory")
-        return FileResponse(local_path)
+        stream, rel_path, snapshot = await _open_download(file_shares, share_cfg, path)
+        if stream is None:
+            return await run_owned_thread(file_shares.list_dir, share_cfg, path)
+        response = _OpenFileResponse(stream, rel_path, snapshot)
+        stream = None  # The response now owns the descriptor.
+        return response
     except FileShareError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    finally:
+        if stream is not None:
+            stream.close()

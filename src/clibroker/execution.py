@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic_core import from_json
@@ -15,6 +17,43 @@ from .file_sharing import FileShareError, FileShareService
 from .models import ExecuteArtifactSchema, ExecuteResponse
 from .policy import PolicyDenied, PolicyEngine, PolicyNoMatch, PolicyValidationError
 from .runner import execute as run_command
+
+
+@dataclass
+class ExecutionProgress:
+    """Execution identity and outcome shared with the request's timeout owner."""
+
+    request_id: str | None = None
+    result: ExecuteResponse | None = None
+    tasks: set[asyncio.Task] = field(default_factory=set)
+
+
+execution_progress: ContextVar[ExecutionProgress | None] = ContextVar(
+    "execution_progress", default=None
+)
+
+
+def execution_started(request_id: str) -> None:
+    progress = execution_progress.get()
+    if progress is not None:
+        progress.request_id = request_id
+        track_execution_task()
+
+
+def track_execution_task() -> None:
+    progress = execution_progress.get()
+    if progress is not None:
+        task = asyncio.current_task()
+        if task is not None and task not in progress.tasks:
+            progress.tasks.add(task)
+            task.add_done_callback(progress.tasks.discard)
+
+
+def execution_finished(result: ExecuteResponse) -> ExecuteResponse:
+    progress = execution_progress.get()
+    if progress is not None:
+        progress.result = result
+    return result
 
 
 class ExecutionForbidden(Exception):
@@ -77,22 +116,43 @@ class ExecutionService:
         client: str,
         allowed_rules: set[str] | list[str] | None,
     ) -> ExecuteResponse:
+        request_id = None
         try:
             if self.control is not None:
-                return await self.control.execute(
+                result = await self.control.execute(
                     self, tool, argv, client=client, allowed_rules=allowed_rules
                 )
-            return await self._execute(
+                return execution_finished(result)
+            request_id = uuid.uuid4().hex
+            execution_started(request_id)
+            result = await self._execute(
                 tool, argv, client=client, allowed_rules=allowed_rules
             )
         except ExecutionForbidden:
             raise
         except HTTPException:
             raise
+        except asyncio.CancelledError:
+            progress = execution_progress.get()
+            get_audit_logger().warning(
+                "execution_interrupted",
+                client=client,
+                tool=tool,
+                request_id=progress.request_id if progress else request_id,
+            )
+            raise
         except Exception:
             # Keep local paths, environment values and other internals out of responses.
             get_audit_logger().exception("execution_failed", client=client, tool=tool)
-            return execution_error("Internal server error")
+            result = execution_error("Internal server error")
+        if request_id is not None:
+            result = result.model_copy(
+                update={
+                    "request_id": request_id,
+                    "state": "succeeded" if result.ok else "failed",
+                }
+            )
+        return execution_finished(result)
 
     async def _execute(
         self,
@@ -227,8 +287,10 @@ class ExecutionService:
         )
 
         # Audit log (post-execution)
+        progress = execution_progress.get()
         log.info(
             "command_executed",
+            request_id=progress.request_id if progress is not None else None,
             client=client,
             tool=tool,
             matched_rule=result.rule_id,

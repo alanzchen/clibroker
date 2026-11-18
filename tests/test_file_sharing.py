@@ -6,7 +6,6 @@ import base64
 import hashlib
 import sys
 import textwrap
-from pathlib import Path
 
 import pytest
 import yaml
@@ -31,7 +30,9 @@ OTHER_TOKEN = "test-other-token"
 READER_SLUG = hashlib.sha256(READER_TOKEN.encode()).hexdigest()[:16]
 
 
-def make_file_config(tmp_path, *, working_dir: str | None = None) -> tuple[Config, dict]:
+def make_file_config(
+    tmp_path, *, working_dir: str | None = None
+) -> tuple[Config, dict]:
     workdir = tmp_path / "workdir"
     docs = tmp_path / "docs"
     rw = tmp_path / "rw"
@@ -252,10 +253,10 @@ class TestFileShareOperations:
         share = service.get_share("himalaya", "rw", ["list_messages"])
         leaked_path = str(paths["rw"] / "secret.txt")
 
-        def fail_write(self, data):  # noqa: ANN001, ARG001
+        def fail_write(*args, **kwargs):
             raise OSError(13, "Permission denied", leaked_path)
 
-        monkeypatch.setattr(Path, "write_bytes", fail_write)
+        monkeypatch.setattr(file_sharing_module.os, "replace", fail_write)
 
         with pytest.raises(FileShareError) as exc_info:
             service.write_file(share, "secret.txt", "content")
@@ -331,7 +332,9 @@ class TestFileShareHTTP:
         assert resp.text == "hello"
 
     @pytest.mark.asyncio
-    async def test_directory_listing_hides_host_paths(self, client: AsyncClient) -> None:
+    async def test_directory_listing_hides_host_paths(
+        self, client: AsyncClient
+    ) -> None:
         resp = await client.get(
             "/files/himalaya/docs",
             headers={"Authorization": f"Bearer {READER_TOKEN}"},

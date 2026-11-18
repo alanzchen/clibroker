@@ -18,6 +18,7 @@ import json
 import keyword
 import mimetypes
 import re
+from functools import wraps
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -33,10 +34,16 @@ from .audit import get_audit_logger
 from .auth import AuthenticatedClient, Authenticator
 from .config import Config, Rule
 from .control import ControlService
-from .execution import ExecutionForbidden, ExecutionService, execution_error
+from .execution import (
+    ExecutionForbidden,
+    ExecutionService,
+    execution_error,
+    track_execution_task,
+)
 from .file_sharing import FileShareError, FileShareService
 from .models import ExecuteArtifactSchema, ExecuteResponse
 from .policy import PolicyEngine
+from .thread_work import run_owned_thread
 
 
 class MCPArtifactSchema(ExecuteArtifactSchema):
@@ -433,6 +440,17 @@ def _register_rule_tool(
     mcp.tool()(handler)
 
 
+def _owned_file_handler(handler):
+    """Expose a sync disk operation without abandoning its thread on cancellation."""
+
+    @wraps(handler)
+    async def owned(*args, **kwargs):
+        track_execution_task()
+        return await run_owned_thread(handler, *args, **kwargs)
+
+    return owned
+
+
 def _register_file_tools(
     mcp: MCPServer,
     tool_name: str,
@@ -636,7 +654,7 @@ def _register_file_tools(
         handler.__name__ = func_name
         handler.__qualname__ = func_name
         handler.__doc__ = description
-        mcp.tool(name=func_name, description=description)(handler)
+        mcp.tool(name=func_name, description=description)(_owned_file_handler(handler))
 
 
 def _flag_to_param_name(flag: str, used: set[str]) -> str:

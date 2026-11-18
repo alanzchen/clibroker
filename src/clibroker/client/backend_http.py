@@ -88,7 +88,22 @@ class HttpBackend:
                     json={"tool": tool, "argv": argv},
                 )
         except Exception as exc:  # pragma: no cover - transport library specific
-            raise ClientBackendError(f"Failed to execute command: {exc}") from exc
+            raise ClientBackendError(
+                f"Failed to execute command: {exc}. Execution outcome is unknown; "
+                "do not automatically retry the command."
+            ) from exc
+
+        if response.status_code == 504:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("request_timed_out") is True:
+                return ExecuteResponse.model_validate(payload)
+            raise ClientBackendError(
+                "Failed to execute command: HTTP 504. Execution outcome is unknown; "
+                "do not automatically retry the command."
+            )
 
         if response.status_code != 200:
             raise ClientBackendError(_format_http_error("execute command", response))
@@ -118,7 +133,7 @@ class HttpBackend:
         destination_path = Path(destination)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         response = await self._get_file_response(tool, share, path)
-        destination_path.write_bytes(response.content)
+        destination_path = _write_new_download(destination_path, response.content)
         return {
             "tool": tool,
             "share": share,
@@ -153,7 +168,7 @@ class HttpBackend:
         if response.status_code != 200:
             raise ClientBackendError(_format_http_error("download file", response))
 
-        destination_path.write_bytes(response.content)
+        destination_path = _write_new_download(destination_path, response.content)
         return {
             "download_url": download_url,
             "path": str(destination_path),
@@ -177,20 +192,43 @@ class HttpBackend:
             raise ClientBackendError(f"Failed to fetch file share path: {exc}") from exc
 
         if response.status_code != 200:
-            raise ClientBackendError(_format_http_error("fetch file share path", response))
+            raise ClientBackendError(
+                _format_http_error("fetch file share path", response)
+            )
 
         return response
+
+
+def _write_new_download(destination: Path, content: bytes) -> Path:
+    """Allocate a fresh name atomically; never follow or replace an existing path."""
+    number = 0
+    while True:
+        candidate = (
+            destination
+            if number == 0
+            else destination.with_name(
+                f"{destination.stem}.{number}{destination.suffix}"
+            )
+        )
+        try:
+            handle = candidate.open("xb")
+        except FileExistsError:
+            number += 1
+            continue
+        try:
+            with handle:
+                handle.write(content)
+        except OSError:
+            candidate.unlink(missing_ok=True)
+            raise
+        return candidate
 
 
 def _file_url(tool: str, share: str, path: str = ".") -> str:
     base = f"/files/{quote(tool, safe='')}/{quote(share, safe='')}"
     if path in ("", "."):
         return base
-    safe_path = "/".join(
-        quote(part, safe="")
-        for part in path.split("/")
-        if part
-    )
+    safe_path = "/".join(quote(part, safe="") for part in path.split("/") if part)
     return f"{base}/{safe_path}"
 
 
