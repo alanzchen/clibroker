@@ -425,8 +425,8 @@ File sharing notes:
 - file contents are read through pinned descriptors; downloads do not reopen a
   validated pathname. File mutations use descriptor-relative operations and
   atomic publication/replacement, so a replacement symlink cannot redirect I/O
-- file I/O requires POSIX descriptor support. Atomic no-overwrite moves use
-  Linux `renameat2` and fail closed if unavailable
+- file I/O requires POSIX descriptor support. Atomic no-overwrite moves and
+  writes use Linux `renameat2` and fail closed if unavailable
 - downloads return the complete file with its captured size; HTTP Range
   requests are not supported and `Accept-Ranges` is not advertised
 
